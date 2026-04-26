@@ -56,6 +56,8 @@ Docker 배포에서는 `.env.prod`의 `PUBLIC_BASE_URL`을 실제 접속 URL로 
 
 SQLite DB는 별도 환경 변수 없이 `.data` volume의 기본 경로를 자동 사용합니다.
 
+Docker image에는 Codex가 workspace를 읽고 ToolRunner가 보조 분석을 수행할 수 있도록 `git`, `rg`, `gitleaks`, `golangci-lint`, Go toolchain, 앱 번들 `eslint`가 포함됩니다.
+
 외부 포트를 바꾸려면 `HOST_PORT`를 지정합니다.
 
 ```bash

@@ -36,6 +36,14 @@ export default function MergeRequestsPage() {
     }
   });
 
+  const cancel = useMutation({
+    mutationFn: (runId: number) => apiSend<{ reviewRun: unknown }>(`/api/reviews/${runId}/cancel`, { method: "POST" }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["merge-requests"] });
+      void queryClient.invalidateQueries({ queryKey: ["review-events"] });
+    }
+  });
+
   return (
     <AppShell>
       <div className="page">
@@ -66,10 +74,17 @@ export default function MergeRequestsPage() {
           <MrReviewTable
             mergeRequests={mergeRequestRows}
             onRetry={(runId) => retry.mutate(runId)}
+            onCancel={(runId) => cancel.mutate(runId)}
+            isCanceling={cancel.isPending}
             onSelect={setSelected}
           />
         </section>
-        <ReviewRunDrawer mergeRequest={selectedMergeRequest} onClose={() => setSelected(null)} />
+        <ReviewRunDrawer
+          mergeRequest={selectedMergeRequest}
+          onClose={() => setSelected(null)}
+          onCancel={(runId) => cancel.mutate(runId)}
+          isCanceling={cancel.isPending}
+        />
       </div>
     </AppShell>
   );

@@ -1,4 +1,4 @@
-import { Codex, type ThreadEvent, type Usage } from "@openai/codex-sdk";
+import { Codex, type SandboxMode, type ThreadEvent, type Usage } from "@openai/codex-sdk";
 import {
   TRIAGE_CODEX_REVIEW_REASONING_EFFORT,
   type CodexReviewModelSettings,
@@ -39,16 +39,17 @@ export type ReviewTriageResult = {
 export type CodexReviewTriageEngineOptions = {
   codexBin?: string;
   codexHome?: string;
+  sandboxMode?: SandboxMode;
 };
 
 export interface ReviewTriageRunner {
-  triage(input: ReviewTriageInput, settings: CodexReviewModelSettings): Promise<ReviewTriageResult>;
+  triage(input: ReviewTriageInput, settings: CodexReviewModelSettings, options?: { signal?: AbortSignal }): Promise<ReviewTriageResult>;
 }
 
 export class CodexReviewTriageEngine implements ReviewTriageRunner {
   constructor(private readonly options: CodexReviewTriageEngineOptions = {}) {}
 
-  async triage(input: ReviewTriageInput, settings: CodexReviewModelSettings): Promise<ReviewTriageResult> {
+  async triage(input: ReviewTriageInput, settings: CodexReviewModelSettings, options: { signal?: AbortSignal } = {}): Promise<ReviewTriageResult> {
     const codex = new Codex({
       ...(this.options.codexBin ? { codexPathOverride: this.options.codexBin } : {}),
       env: codexEnv(this.options.codexHome)
@@ -58,11 +59,14 @@ export class CodexReviewTriageEngine implements ReviewTriageRunner {
       modelReasoningEffort: TRIAGE_CODEX_REVIEW_REASONING_EFFORT,
       ...(input.workingDirectory ? { workingDirectory: input.workingDirectory } : {}),
       skipGitRepoCheck: true,
-      sandboxMode: "read-only",
+      sandboxMode: this.options.sandboxMode ?? "read-only",
       approvalPolicy: "never"
     });
 
-    const { events } = await thread.runStreamed(buildTriagePrompt(input), { outputSchema: TRIAGE_OUTPUT_SCHEMA });
+    const { events } = await thread.runStreamed(buildTriagePrompt(input), {
+      outputSchema: TRIAGE_OUTPUT_SCHEMA,
+      ...(options.signal ? { signal: options.signal } : {})
+    });
     const { finalResponse, usage } = await collectFinalResponse(events);
     const raw = finalResponse.trim();
     if (!raw) throw new Error("Codex triage response was empty");

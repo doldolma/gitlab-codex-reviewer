@@ -1,11 +1,22 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { ExternalLink, X } from "lucide-react";
+import { ExternalLink, X, XCircle } from "lucide-react";
 import { apiGet, type MergeRequest, type ReviewEvent } from "../lib/api-client";
 import { ReviewEventTimeline, ReviewProgressSummary } from "./review-event-timeline";
+import { ReviewFeedbackPanel } from "./review-feedback";
 
-export function ReviewRunDrawer({ mergeRequest, onClose }: { mergeRequest: MergeRequest | null; onClose: () => void }) {
+export function ReviewRunDrawer({
+  mergeRequest,
+  onClose,
+  onCancel,
+  isCanceling = false
+}: {
+  mergeRequest: MergeRequest | null;
+  onClose: () => void;
+  onCancel?: (runId: number) => void;
+  isCanceling?: boolean;
+}) {
   const events = useQuery({
     queryKey: ["review-events", "mr", mergeRequest?.reviewRunId],
     queryFn: () => apiGet<{ events: ReviewEvent[] }>(`/api/reviews/${mergeRequest!.reviewRunId}/events`),
@@ -39,6 +50,7 @@ export function ReviewRunDrawer({ mergeRequest, onClose }: { mergeRequest: Merge
           <dd>{mergeRequest.reviewedAt ? new Date(mergeRequest.reviewedAt).toLocaleString() : "아직 없음"}</dd>
         </dl>
         <ReviewProgressSummary events={events.data?.events ?? []} status={mergeRequest.reviewStatus} />
+        {mergeRequest.reviewStatus === "canceled" && <div className="alert neutral">리뷰가 취소되었습니다.</div>}
         {mergeRequest.errorMessage && (
           <pre className="error-box">{mergeRequest.errorMessage}</pre>
         )}
@@ -51,11 +63,18 @@ export function ReviewRunDrawer({ mergeRequest, onClose }: { mergeRequest: Merge
             <pre className="markdown-box">{mergeRequest.findingsMarkdown}</pre>
           </section>
         )}
+        <ReviewFeedbackPanel runType="mr" runId={mergeRequest.reviewRunId} review={mergeRequest.structuredReview} />
         <section className="drawer-section">
           <h3>실행 기록</h3>
           <ReviewEventTimeline events={events.data?.events ?? []} isLoading={events.isLoading} />
         </section>
         <div className="button-row">
+          {mergeRequest.reviewRunId && isActiveStatus(mergeRequest.reviewStatus) && onCancel && (
+            <button className="button secondary full" onClick={() => onCancel(mergeRequest.reviewRunId!)} disabled={isCanceling}>
+              <XCircle size={16} />
+              리뷰 취소
+            </button>
+          )}
           <a className="button secondary full" href={mergeRequest.webUrl} target="_blank" rel="noreferrer">
             <ExternalLink size={16} />
             GitLab에서 열기
@@ -84,6 +103,8 @@ function labelForStatus(status: string | null): string {
       return "완료: 이슈 없음";
     case "failed":
       return "실패";
+    case "canceled":
+      return "취소됨";
     default:
       return "대기";
   }

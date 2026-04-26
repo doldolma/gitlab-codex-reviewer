@@ -67,6 +67,15 @@ HOST_PORT=3300 docker compose up -d --build
 Docker image는 내부에서 `0.0.0.0:3000`으로 listen합니다. `.env.prod`에는 `PUBLIC_BASE_URL`, GitLab OAuth 값처럼 배포마다 달라지는 값만 둡니다. `.env.example`을 복사한 뒤 `PUBLIC_BASE_URL`을 실제 접속 URL로 바꿔주세요.
 SQLite DB는 환경 변수로 설정하지 않으며, `.data/gitlab-codex-reviewer.sqlite` 기본 경로를 자동 사용합니다.
 
+Docker image에는 리뷰 도구도 함께 들어갑니다.
+
+- 기본 탐색 도구: `git`, `rg`, `find`, `grep`, `sed`, `awk`, `jq`, `python3`
+- secret scan: `gitleaks`
+- Go lint: `golangci-lint`와 Go toolchain
+- JS/TS lint fallback: 앱에 번들된 `eslint`
+
+ToolRunner는 read-only로만 동작합니다. `golangci-lint`는 대상 repository에 `.golangci.*` 설정이 있을 때 실행되고, `eslint`는 대상 repository의 ESLint 설정을 읽습니다. 대상 repository의 custom plugin/parser가 설치되어 있지 않으면 JS/TS lint는 실패가 아니라 skip 이벤트로 남깁니다.
+
 ## 환경 변수
 
 `.env.example`의 모든 값은 아래와 같습니다.

@@ -345,12 +345,16 @@ select {
 }
 
 .commit-review-form label:nth-of-type(1) {
-  grid-column: span 4;
+  grid-column: span 3;
+}
+
+.commit-review-form label:nth-of-type(3) {
+  grid-column: span 3;
 }
 
 .commit-review-form label:nth-of-type(2),
-.commit-review-form label:nth-of-type(3) {
-  grid-column: span 3;
+.commit-review-form label:nth-of-type(4) {
+  grid-column: span 2;
 }
 
 .commit-review-form .form-submit {
@@ -510,6 +514,68 @@ select:disabled {
 .project-settings-table th,
 .project-settings-table td {
   padding: 10px 12px;
+}
+
+.table-heading-with-tooltip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.tooltip-trigger {
+  position: relative;
+  display: inline-flex;
+}
+
+.tooltip-icon {
+  width: 20px;
+  height: 20px;
+  border: 0;
+  border-radius: 999px;
+  display: inline-grid;
+  place-items: center;
+  background: #eef6f4;
+  color: #0f6a5f;
+  cursor: help;
+  padding: 0;
+}
+
+.tooltip-icon:focus-visible {
+  outline: 2px solid #0f6a5f;
+  outline-offset: 2px;
+}
+
+.tooltip-panel {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 8px);
+  left: 50%;
+  width: 320px;
+  transform: translateX(-50%);
+  display: none;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid #cfd6dd;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 16px 36px rgba(32, 35, 39, 0.16);
+  color: #202327;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0;
+  line-height: 1.45;
+  text-transform: none;
+  white-space: normal;
+}
+
+.tooltip-panel strong {
+  font-size: 13px;
+}
+
+.tooltip-trigger:hover .tooltip-panel,
+.tooltip-trigger:focus-within .tooltip-panel {
+  display: grid;
 }
 
 .project-settings-table .compact-input,
@@ -1141,6 +1207,78 @@ code {
   display: grid;
   gap: 12px;
   margin-top: 18px;
+}
+
+.drawer.wide {
+  width: min(720px, 100vw - 32px);
+}
+
+.stacked-form {
+  display: grid;
+  gap: 18px;
+}
+
+.stacked-form label,
+.instruction-card label {
+  display: grid;
+  gap: 8px;
+}
+
+.stacked-form textarea,
+.instruction-card textarea {
+  min-height: 96px;
+  resize: vertical;
+}
+
+.section-heading.compact {
+  margin-bottom: 10px;
+}
+
+.button.small {
+  min-height: 34px;
+  padding: 8px 12px;
+  font-size: 13px;
+}
+
+.instruction-list,
+.feedback-list {
+  display: grid;
+  gap: 12px;
+}
+
+.instruction-card,
+.feedback-card {
+  display: grid;
+  gap: 10px;
+  border: 1px solid #e1e7ed;
+  border-radius: 8px;
+  padding: 12px;
+  background: #fbfcfd;
+}
+
+.instruction-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.checkbox-row {
+  display: inline-flex !important;
+  grid-template-columns: none;
+  align-items: center;
+  gap: 8px;
+  color: #59636f;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.feedback-card small {
+  color: #74808c;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+}
+
+.button-row.wrap {
+  flex-wrap: wrap;
 }
 
 @media (max-width: 900px) {

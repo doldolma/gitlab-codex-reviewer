@@ -7,9 +7,11 @@ import { GitLabClient, type GitLabCommit, type GitLabDiff, type GitLabMergeReque
 import { GitWorkspaceManager } from "../lib/git-workspace";
 import { logReview, type ReviewLogSource } from "../lib/logger";
 import { publishCommitReviewNote, publishReviewNote } from "../lib/note-publisher";
-import { REVIEW_PROMPT_VERSION, type ReviewPromptInput } from "../lib/prompts";
+import { REVIEW_PROMPT_VERSION, type PromptToolFinding, type ReviewIssue, type ReviewPromptInput } from "../lib/prompts";
+import { publishMergeRequestInlineComments } from "../lib/inline-comment-publisher";
 import type { ReviewerBotService } from "../lib/reviewer-bot";
-import { resolveFixedReviewStrategy, type ReviewStrategy, type ReviewStrategyResolution } from "../lib/review-strategy";
+import { defaultPathFilters, filterChangedFiles, matchReviewInstructions, type ProjectReviewConfig } from "../lib/review-config";
+import { parseReviewStrategy, resolveFixedReviewStrategy, type ReviewStrategy, type ReviewStrategyResolution } from "../lib/review-strategy";
 import { CodexReviewTriageEngine, type ReviewTriageRunner } from "../lib/review-triage";
 import {
   ReviewStateStore,
@@ -23,6 +25,7 @@ import {
   type ReviewRunType,
   type SharedProjectGroup
 } from "../lib/review-state";
+import { ReadonlyToolRunner, type ToolRunnerEvent } from "../lib/tool-runner";
 
 type ScanSummary = { reviewed: number; skipped: number; errors: number };
 type ReviewSettingsProvider = {
@@ -35,12 +38,22 @@ type EventContext = {
   project: string;
   sha: string;
 };
+type CancellationCheck = () => Promise<void>;
 
 const REVIEW_JOB_HEARTBEAT_MS = 30_000;
 const STALE_REVIEW_JOB_MS = 2 * 60_000;
+const REVIEW_JOB_CANCEL_POLL_MS = 1_000;
+
+class ReviewCanceledError extends Error {
+  constructor() {
+    super("Review was canceled");
+    this.name = "ReviewCanceledError";
+  }
+}
 
 export class ReviewWorker {
   private running = false;
+  private missingReviewerBotWarningShown = false;
 
   constructor(
     private readonly config: AppConfig,
@@ -53,7 +66,8 @@ export class ReviewWorker {
       async getEffectiveReviewSettings() {
         return defaultModelSettings();
       }
-    }
+    },
+    private readonly toolRunner: ReadonlyToolRunner = new ReadonlyToolRunner()
   ) {
     this.workspace = new GitWorkspaceManager(config);
   }
@@ -72,12 +86,20 @@ export class ReviewWorker {
     let errors = 0;
 
     try {
-      console.log(`[${source}] [review] Scan started.`);
       const botConnection = await this.reviewerBot.getConnection();
       if (!botConnection) {
-        console.warn(`[${source}] [review] Scan skipped because reviewer bot token is not connected.`);
-        return { reviewed: 0, skipped: 0, errors: 1 };
+        if (source === "worker") {
+          if (!this.missingReviewerBotWarningShown) {
+            console.warn("[worker] [review] Background scan paused because reviewer bot token is not connected.");
+            this.missingReviewerBotWarningShown = true;
+          }
+        } else {
+          console.warn("[web] [review] Scan skipped because reviewer bot token is not connected.");
+        }
+        return { reviewed: 0, skipped: 1, errors: 0 };
       }
+      this.missingReviewerBotWarningShown = false;
+      console.log(`[${source}] [review] Scan started.`);
       const client = new GitLabClient(botConnection);
       const groups = await this.state.listSharedProjectGroups(userId);
       console.log(`[${source}] [review] Loaded ${groups.length} shared project group(s).`);
@@ -123,9 +145,10 @@ export class ReviewWorker {
 
   async enqueueCommitReviewManually(
     userId: number,
-    input: { gitlabProjectId: string; commitSha: string; branchName?: string | null }
+    input: { gitlabProjectId: string; commitSha: string; branchName?: string | null; reviewStrategy?: ReviewStrategy }
   ): Promise<{ run: CommitReviewRunView; job: ReviewJobView }> {
     console.log(`[web] [review] Manual commit review queued: project=${input.gitlabProjectId}, sha=${shortSha(input.commitSha)}.`);
+    const reviewStrategy = parseReviewStrategy(input.reviewStrategy);
     const botConnection = await this.reviewerBot.getConnection();
     if (!botConnection) throw new Error("Reviewer bot token is not connected");
     const client = new GitLabClient(botConnection);
@@ -148,12 +171,14 @@ export class ReviewWorker {
       input.branchName ?? null,
       commit,
       "manual",
-      "queued"
+      "queued",
+      reviewStrategy
     );
     const context: EventContext = { source: "web", runType: "commit", runId, project: sharedProject.gitlabProjectId, sha: commit.id };
     await this.recordEvent(context, "info", "run_queued", "Commit review queued; waiting for worker.", {
       branchName: input.branchName ?? null,
       trigger: "manual",
+      reviewStrategy,
       sharedProjectId: sharedProject.id
     });
     const job = await this.state.createReviewJob({
@@ -165,7 +190,8 @@ export class ReviewWorker {
         gitlabProjectRefId: sharedProject.id,
         gitlabProjectId: sharedProject.gitlabProjectId,
         commitSha: commit.id,
-        branchName: input.branchName ?? null
+        branchName: input.branchName ?? null,
+        reviewStrategy
       }
     });
     const run = await this.state.getCommitRunById(userId, runId);
@@ -199,7 +225,7 @@ export class ReviewWorker {
       "info",
       "run_queued",
       "Commit review retry queued; waiting for worker.",
-      { branchName: run.branchName, trigger: run.trigger }
+      { branchName: run.branchName, trigger: run.trigger, reviewStrategy: run.reviewStrategyOverride }
     );
     const job = await this.state.createReviewJob({
       kind: "commit_retry",
@@ -211,7 +237,31 @@ export class ReviewWorker {
     return { run, job };
   }
 
-  async processQueuedJobs(limit = 3): Promise<{ processed: number; deferred: number; failed: number }> {
+  async cancelReviewRun(userId: number, runId: number): Promise<ReviewRunRow> {
+    const run = await this.state.cancelRun(userId, runId);
+    await this.recordEvent(
+      { source: "web", runType: "mr", runId: run.id, project: run.gitlabProjectId, sha: run.headSha },
+      "warn",
+      "run_canceled",
+      "Review run was canceled by user.",
+      { mrIid: run.mrIid }
+    );
+    return run;
+  }
+
+  async cancelCommitReview(userId: number, runId: number): Promise<CommitReviewRunView> {
+    const run = await this.state.cancelCommitRun(userId, runId);
+    await this.recordEvent(
+      { source: "web", runType: "commit", runId: run.id, project: run.gitlabProjectId, sha: run.commitSha },
+      "warn",
+      "run_canceled",
+      "Review run was canceled by user.",
+      { branchName: run.branchName, trigger: run.trigger }
+    );
+    return run;
+  }
+
+  async processQueuedJobs(limit = 3): Promise<{ processed: number; deferred: number; failed: number; canceled: number }> {
     const recovered = await this.state.recoverStaleRunningJobs(STALE_REVIEW_JOB_MS);
     if (recovered > 0) {
       console.warn(`[worker] [review] Recovered ${recovered} stale running review job(s).`);
@@ -228,30 +278,55 @@ export class ReviewWorker {
     return {
       processed: results.filter((result) => result === "processed").length,
       deferred: results.filter((result) => result === "deferred").length,
-      failed: results.filter((result) => result === "failed").length
+      failed: results.filter((result) => result === "failed").length,
+      canceled: results.filter((result) => result === "canceled").length
     };
   }
 
-  private async processClaimedJob(job: ReviewJobView): Promise<"processed" | "deferred" | "failed"> {
+  private async processClaimedJob(job: ReviewJobView): Promise<"processed" | "deferred" | "failed" | "canceled"> {
+    const abortController = new AbortController();
     const heartbeat = setInterval(() => {
       void this.state.heartbeatReviewJob(job.id).catch((error) => {
         console.warn(`[worker] [review] Failed to heartbeat job=${job.id}`, error);
       });
     }, REVIEW_JOB_HEARTBEAT_MS);
     heartbeat.unref?.();
+    const cancelPoll = setInterval(() => {
+      void this.state.isReviewJobCanceled(job.id).then((canceled) => {
+        if (canceled && !abortController.signal.aborted) abortController.abort(new ReviewCanceledError());
+      }).catch((error) => {
+        console.warn(`[worker] [review] Failed to check cancellation for job=${job.id}`, error);
+      });
+    }, REVIEW_JOB_CANCEL_POLL_MS);
+    cancelPoll.unref?.();
 
     try {
-      const result = await this.executeReviewJob(job);
+      const checkCancellation = async () => {
+        throwIfCanceled(abortController.signal);
+        if (await this.state.isReviewJobCanceled(job.id)) {
+          abortController.abort(new ReviewCanceledError());
+          throw new ReviewCanceledError();
+        }
+      };
+
+      const result = await this.executeReviewJob(job, abortController.signal, checkCancellation);
       if (result === "deferred") return "deferred";
+      if (await this.state.isReviewJobCanceled(job.id)) return "canceled";
       await this.state.completeReviewJob(job.id);
       return "processed";
     } catch (error) {
+      if (isCancellationError(error, abortController.signal)) {
+        if (job.runType && job.runId) await this.state.markRunCanceled(job.runType, job.runId);
+        console.log(`[worker] [review] Job canceled: id=${job.id}, kind=${job.kind}`);
+        return "canceled";
+      }
       await this.failRunForJob(job, error);
       await this.state.failReviewJob(job.id, error);
       console.error(`[worker] [review] Job failed: id=${job.id}, kind=${job.kind}`, error);
       return "failed";
     } finally {
       clearInterval(heartbeat);
+      clearInterval(cancelPoll);
     }
   }
 
@@ -275,7 +350,8 @@ export class ReviewWorker {
     }
   }
 
-  private async executeReviewJob(job: ReviewJobView): Promise<"processed" | "deferred"> {
+  private async executeReviewJob(job: ReviewJobView, signal?: AbortSignal, checkCancellation?: CancellationCheck): Promise<"processed" | "deferred"> {
+    await ensureNotCanceled(signal, checkCancellation);
     console.log(`[worker] [review] Job claimed: id=${job.id}, kind=${job.kind}.`);
     if (job.runType && job.runId) {
       await this.recordEvent(
@@ -289,24 +365,26 @@ export class ReviewWorker {
 
     switch (job.kind) {
       case "commit_manual":
-        return this.executeManualCommitJob(job);
+        return this.executeManualCommitJob(job, signal, checkCancellation);
       case "commit_retry":
-        return this.executeCommitRetryJob(job);
+        return this.executeCommitRetryJob(job, signal, checkCancellation);
       case "mr_retry":
-        return this.executeMrRetryJob(job);
+        return this.executeMrRetryJob(job, signal, checkCancellation);
       case "commit_webhook":
-        return this.executeWebhookCommitJob(job);
+        return this.executeWebhookCommitJob(job, signal, checkCancellation);
       case "mr_webhook":
-        return this.executeWebhookMrJob(job);
+        return this.executeWebhookMrJob(job, signal, checkCancellation);
       case "scan_user":
-        await this.scanOnce(job.userId);
+        await ensureNotCanceled(signal, checkCancellation);
+        await this.scanOnce();
         return "processed";
       default:
         throw new Error(`Unknown review job kind: ${job.kind}`);
     }
   }
 
-  private async executeWebhookCommitJob(job: ReviewJobView): Promise<"processed" | "deferred"> {
+  private async executeWebhookCommitJob(job: ReviewJobView, signal?: AbortSignal, checkCancellation?: CancellationCheck): Promise<"processed" | "deferred"> {
+    await ensureNotCanceled(signal, checkCancellation);
     const gitlabProjectRefId = numberFromPayload(job.payload, "gitlabProjectRefId");
     const commitSha = stringFromPayload(job.payload, "commitSha");
     if (!gitlabProjectRefId || !commitSha) throw new Error("Webhook commit review job payload is invalid");
@@ -317,7 +395,7 @@ export class ReviewWorker {
     const sharedProject = await this.state.getGitlabProject(gitlabProjectRefId);
     const projectLockKey = `project:${sharedProject.gitlabHost}:${sharedProject.gitlabProjectId}`;
     if (!(await this.state.acquireLock(projectLockKey))) {
-      await this.requeueBusyJob(job, "Project review is already running.");
+      await this.requeueBusyJob(job, "Project review is already running.", checkCancellation);
       return "deferred";
     }
     try {
@@ -331,10 +409,13 @@ export class ReviewWorker {
         branchName,
         commit,
         "auto",
-        "worker"
+        "worker",
+        null,
+        signal,
+        checkCancellation
       );
       if (!didReview) {
-        await this.requeueBusyJob(job, "Commit review lock is already held.");
+        await this.requeueBusyJob(job, "Commit review lock is already held.", checkCancellation);
         return "deferred";
       }
       return "processed";
@@ -343,7 +424,8 @@ export class ReviewWorker {
     }
   }
 
-  private async executeWebhookMrJob(job: ReviewJobView): Promise<"processed" | "deferred"> {
+  private async executeWebhookMrJob(job: ReviewJobView, signal?: AbortSignal, checkCancellation?: CancellationCheck): Promise<"processed" | "deferred"> {
+    await ensureNotCanceled(signal, checkCancellation);
     const gitlabProjectRefId = numberFromPayload(job.payload, "gitlabProjectRefId");
     const mrIid = numberFromPayload(job.payload, "mrIid");
     const headSha = stringFromPayload(job.payload, "headSha");
@@ -354,7 +436,7 @@ export class ReviewWorker {
     const sharedProject = await this.state.getGitlabProject(gitlabProjectRefId);
     const projectLockKey = `project:${sharedProject.gitlabHost}:${sharedProject.gitlabProjectId}`;
     if (!(await this.state.acquireLock(projectLockKey))) {
-      await this.requeueBusyJob(job, "Project review is already running.");
+      await this.requeueBusyJob(job, "Project review is already running.", checkCancellation);
       return "deferred";
     }
     try {
@@ -370,10 +452,12 @@ export class ReviewWorker {
         { id: representativeProjectId },
         mr,
         headSha,
-        "worker"
+        "worker",
+        signal,
+        checkCancellation
       );
       if (!didReview) {
-        await this.requeueBusyJob(job, "MR review lock is already held.");
+        await this.requeueBusyJob(job, "MR review lock is already held.", checkCancellation);
         return "deferred";
       }
       return "processed";
@@ -382,18 +466,20 @@ export class ReviewWorker {
     }
   }
 
-  private async executeManualCommitJob(job: ReviewJobView): Promise<"processed" | "deferred"> {
+  private async executeManualCommitJob(job: ReviewJobView, signal?: AbortSignal, checkCancellation?: CancellationCheck): Promise<"processed" | "deferred"> {
+    await ensureNotCanceled(signal, checkCancellation);
     const gitlabProjectRefId = numberFromPayload(job.payload, "gitlabProjectRefId");
     const commitSha = stringFromPayload(job.payload, "commitSha");
     if (!gitlabProjectRefId || !commitSha) throw new Error("Manual commit review job payload is invalid");
     const branchName = stringFromPayload(job.payload, "branchName");
+    const reviewStrategy = parseReviewStrategy(stringFromPayload(job.payload, "reviewStrategy"));
     const botConnection = await this.reviewerBot.getConnection();
     if (!botConnection) throw new Error("Reviewer bot token is not connected");
     const client = new GitLabClient(botConnection);
     const sharedProject = await this.state.getGitlabProject(gitlabProjectRefId);
     const projectLockKey = `project:${sharedProject.gitlabHost}:${sharedProject.gitlabProjectId}`;
     if (!(await this.state.acquireLock(projectLockKey))) {
-      await this.requeueBusyJob(job, "Project review is already running.");
+      await this.requeueBusyJob(job, "Project review is already running.", checkCancellation);
       return "deferred";
     }
     try {
@@ -407,10 +493,13 @@ export class ReviewWorker {
         branchName,
         commit,
         "manual",
-        "worker"
+        "worker",
+        reviewStrategy,
+        signal,
+        checkCancellation
       );
       if (!didReview) {
-        await this.requeueBusyJob(job, "Commit review lock is already held.");
+        await this.requeueBusyJob(job, "Commit review lock is already held.", checkCancellation);
         return "deferred";
       }
       return "processed";
@@ -419,7 +508,8 @@ export class ReviewWorker {
     }
   }
 
-  private async executeCommitRetryJob(job: ReviewJobView): Promise<"processed" | "deferred"> {
+  private async executeCommitRetryJob(job: ReviewJobView, signal?: AbortSignal, checkCancellation?: CancellationCheck): Promise<"processed" | "deferred"> {
+    await ensureNotCanceled(signal, checkCancellation);
     const runId = job.runId ?? numberFromPayload(job.payload, "runId");
     if (!runId) throw new Error("Commit retry job payload is invalid");
     const run = await this.state.getCommitRunById(job.userId, runId);
@@ -434,7 +524,7 @@ export class ReviewWorker {
       const sharedProject = await this.state.getGitlabProject(run.gitlabProjectRefId);
       const projectLockKey = `project:${sharedProject.gitlabHost}:${sharedProject.gitlabProjectId}`;
       if (!(await this.state.acquireLock(projectLockKey))) {
-        await this.requeueBusyJob(job, "Project review is already running.");
+        await this.requeueBusyJob(job, "Project review is already running.", checkCancellation);
         return "deferred";
       }
       try {
@@ -447,10 +537,13 @@ export class ReviewWorker {
           run.branchName,
           commit,
           trigger,
-          "worker"
+          "worker",
+          run.reviewStrategyOverride,
+          signal,
+          checkCancellation
         );
         if (!didReview) {
-          await this.requeueBusyJob(job, "Commit review lock is already held.");
+          await this.requeueBusyJob(job, "Commit review lock is already held.", checkCancellation);
           return "deferred";
         }
         return "processed";
@@ -460,15 +553,16 @@ export class ReviewWorker {
     }
 
     const project = run.projectId ? await this.state.getProject(job.userId, run.projectId).catch(() => null) : null;
-    const didReview = await this.reviewCommit(client, job.userId, project, run.gitlabProjectId, run.branchName, commit, trigger, "worker");
+    const didReview = await this.reviewCommit(client, job.userId, project, run.gitlabProjectId, run.branchName, commit, trigger, "worker", signal, checkCancellation);
     if (!didReview) {
-      await this.requeueBusyJob(job, "Commit review lock is already held.");
+      await this.requeueBusyJob(job, "Commit review lock is already held.", checkCancellation);
       return "deferred";
     }
     return "processed";
   }
 
-  private async executeMrRetryJob(job: ReviewJobView): Promise<"processed" | "deferred"> {
+  private async executeMrRetryJob(job: ReviewJobView, signal?: AbortSignal, checkCancellation?: CancellationCheck): Promise<"processed" | "deferred"> {
+    await ensureNotCanceled(signal, checkCancellation);
     const runId = job.runId ?? numberFromPayload(job.payload, "runId");
     if (!runId) throw new Error("MR retry job payload is invalid");
     const run = await this.state.getRunById(job.userId, runId);
@@ -478,23 +572,23 @@ export class ReviewWorker {
     const client = new GitLabClient(botConnection);
 
     if (!run.gitlabProjectRefId) {
-      await this.reviewByCoordinates(client, job.userId, run.projectId, run.gitlabProjectId, run.displayName, run.mrIid, run.headSha, "worker");
+      await this.reviewByCoordinates(client, job.userId, run.projectId, run.gitlabProjectId, run.displayName, run.mrIid, run.headSha, "worker", signal, checkCancellation);
       return "processed";
     }
 
     const sharedProject = await this.state.getGitlabProject(run.gitlabProjectRefId);
     const projectLockKey = `project:${sharedProject.gitlabHost}:${sharedProject.gitlabProjectId}`;
     if (!(await this.state.acquireLock(projectLockKey))) {
-      await this.requeueBusyJob(job, "Project review is already running.");
+      await this.requeueBusyJob(job, "Project review is already running.", checkCancellation);
       return "deferred";
     }
     try {
       const mrs = await client.listOpenedMergeRequests(sharedProject.gitlabProjectId);
       const mr = mrs.find((candidate) => candidate.iid === run.mrIid);
       if (!mr) throw new Error("Merge request is no longer opened");
-      const didReview = await this.reviewMrShared(client, botConnection.accessToken, sharedProject, { id: run.projectId }, mr, run.headSha, "worker");
+      const didReview = await this.reviewMrShared(client, botConnection.accessToken, sharedProject, { id: run.projectId }, mr, run.headSha, "worker", signal, checkCancellation);
       if (!didReview) {
-        await this.requeueBusyJob(job, "MR review lock is already held.");
+        await this.requeueBusyJob(job, "MR review lock is already held.", checkCancellation);
         return "deferred";
       }
       return "processed";
@@ -503,8 +597,10 @@ export class ReviewWorker {
     }
   }
 
-  private async requeueBusyJob(job: ReviewJobView, message: string): Promise<void> {
+  private async requeueBusyJob(job: ReviewJobView, message: string, checkCancellation?: CancellationCheck): Promise<void> {
+    await ensureNotCanceled(undefined, checkCancellation);
     await this.state.requeueReviewJob(job.id, message);
+    await ensureNotCanceled(undefined, checkCancellation);
     if (job.runType && job.runId) {
       await this.recordEvent(
         { source: "worker", runType: job.runType, runId: job.runId, project: stringFromPayload(job.payload, "gitlabProjectId") ?? "unknown", sha: stringFromPayload(job.payload, "commitSha") ?? String(job.runId) },
@@ -574,9 +670,7 @@ export class ReviewWorker {
   }
 
   private async listMergeRequestsForGroup(client: GitLabClient, group: SharedProjectGroup): Promise<GitLabMergeRequest[]> {
-    if (group.mrTargetsAll || !group.mrTargetBranches.length) {
-      return client.listOpenedMergeRequests(group.gitlabProject.gitlabProjectId);
-    }
+    if (!group.mrTargetBranches.length) return [];
 
     const byIid = new Map<number, GitLabMergeRequest>();
     for (const branch of uniqueNonEmpty(group.mrTargetBranches)) {
@@ -711,7 +805,7 @@ export class ReviewWorker {
 
   private async listMergeRequestsForProject(client: GitLabClient, project: ProjectRow): Promise<GitLabMergeRequest[]> {
     const targetBranches = uniqueNonEmpty(project.mrTargetBranches);
-    if (!targetBranches.length) return client.listOpenedMergeRequests(project.gitlabProjectId);
+    if (!targetBranches.length) return [];
 
     const byIid = new Map<number, GitLabMergeRequest>();
     for (const branch of targetBranches) {
@@ -800,8 +894,11 @@ export class ReviewWorker {
     displayName: string,
     mrIid: number,
     headSha: string,
-    source: ReviewLogSource
+    source: ReviewLogSource,
+    signal?: AbortSignal,
+    checkCancellation?: CancellationCheck
   ): Promise<void> {
+    await ensureNotCanceled(signal, checkCancellation);
     const mrs = await client.listOpenedMergeRequests(gitlabProjectId);
     const mr = mrs.find((candidate) => candidate.iid === mrIid);
     if (!mr) throw new Error("Merge request is no longer opened");
@@ -821,6 +918,8 @@ export class ReviewWorker {
         reviewStrategy: "balanced",
         reviewStrategyUpdatedByUserId: null,
         reviewStrategyUpdatedAt: null,
+        reviewProfile: "assertive",
+        pathFilters: defaultPathFilters(),
         webhookStatus: "missing",
         webhookUrl: null,
         webhookLastVerifiedAt: null,
@@ -828,7 +927,9 @@ export class ReviewWorker {
       },
       mr,
       headSha,
-      source
+      source,
+      signal,
+      checkCancellation
     );
   }
 
@@ -837,8 +938,11 @@ export class ReviewWorker {
     project: ProjectRow,
     mr: GitLabMergeRequest,
     headSha: string,
-    source: ReviewLogSource
+    source: ReviewLogSource,
+    signal?: AbortSignal,
+    checkCancellation?: CancellationCheck
   ): Promise<boolean> {
+    await ensureNotCanceled(signal, checkCancellation);
     const lockKey = `${project.id}:${mr.iid}:${headSha}`;
     if (!(await this.state.acquireLock(lockKey))) return false;
     const runId = await this.state.startRun(project.id, mr.iid, headSha);
@@ -847,21 +951,33 @@ export class ReviewWorker {
     try {
       await this.recordEvent(context, "info", "run_started", "MR review run started.", { mrIid: mr.iid, projectDbId: project.id });
       await this.recordEvent(context, "info", "lock_acquired", "Review lock acquired.");
+      await ensureNotCanceled(signal, checkCancellation);
       const diffs = await client.listMergeRequestDiffs(project.gitlabProjectId, mr.iid);
-      const formatted = formatDiffForReview(project.displayName, mr, diffs, this.config.maxDiffBytes);
+      const reviewConfig = await this.loadProjectReviewConfig(context, project, diffs);
+      const reviewableDiffs = filterDiffsForReview(diffs, reviewConfig.pathFilters);
+      const formatted = formatDiffForReview(project.displayName, mr, reviewableDiffs, this.config.maxDiffBytes);
       await this.recordEvent(context, "info", "diff_fetched", "GitLab MR diff fetched.", {
         diffFileCount: diffs.length,
+        reviewableFileCount: reviewableDiffs.length,
         truncated: formatted.truncated,
         omittedFiles: formatted.omittedFiles
       });
-      const reviewInput = buildMrReviewInput(project.displayName, mr, headSha, formatted.text, null);
-      const { runtimeSettings, resolution } = await this.resolveRuntimeSettings(context, project.reviewStrategy, reviewInput, formatted, diffs);
-      await this.recordEvent(context, "info", "codex_started", "Codex review started.", codexStartMetadata(runtimeSettings, resolution));
+      const reviewInput = await this.enhanceReviewInput(
+        context,
+        buildMrReviewInput(project.displayName, mr, headSha, formatted.text, null),
+        reviewConfig,
+        reviewableDiffs,
+        null
+      );
+      const { runtimeSettings, resolution } = await this.resolveRuntimeSettings(context, project.reviewStrategy, reviewInput, formatted, reviewableDiffs, signal);
+      await this.recordEvent(context, "info", "codex_started", "Codex review started.", codexStartMetadata(runtimeSettings, resolution, this.config.codexSandboxMode));
       const result = await this.reviewer.review(
         reviewInput,
         (event) => this.recordEvent(context, event.level, event.step, event.message, event.metadata),
-        runtimeSettings
+        runtimeSettings,
+        { signal }
       );
+      await ensureNotCanceled(signal, checkCancellation);
       await this.recordEvent(context, "info", "codex_finished", "Codex review finished.", {
         hasFindings: result.hasFindings,
         responseBytes: Buffer.byteLength(result.raw, "utf8"),
@@ -869,8 +985,9 @@ export class ReviewWorker {
         shouldPostComment: result.structured.shouldPostComment
       });
       if (!result.hasFindings) {
+        await ensureNotCanceled(signal, checkCancellation);
         const comment = await publishReviewNote(client, project.gitlabProjectId, mr.iid, headSha, result.markdown);
-        await this.state.finishNoFindings(runId, result.markdown, comment);
+        await this.state.finishNoFindings(runId, result.markdown, comment, result.structured);
         await this.recordEvent(context, "info", "no_findings", "Codex completed with no actionable findings; summary comment was posted to GitLab.");
         await this.recordEvent(context, "info", "comment_posted", "GitLab MR review summary comment posted.", {
           commentId: comment.id,
@@ -880,8 +997,14 @@ export class ReviewWorker {
         return true;
       }
 
+      await ensureNotCanceled(signal, checkCancellation);
+      await this.publishInlineReviewComments(context, client, project.gitlabProjectId, mr, headSha, reviewableDiffs, [
+        ...result.structured.criticalIssues,
+        ...result.structured.potentialIssues
+      ]);
+      await ensureNotCanceled(signal, checkCancellation);
       const comment = await publishReviewNote(client, project.gitlabProjectId, mr.iid, headSha, result.markdown);
-      await this.state.finishCommented(runId, comment, result.markdown);
+      await this.state.finishCommented(runId, comment, result.markdown, result.structured);
       await this.recordEvent(context, "info", "comment_posted", "GitLab MR review comment posted.", {
         commentId: comment.id,
         skippedExistingComment: comment.skipped
@@ -889,6 +1012,7 @@ export class ReviewWorker {
       await this.recordEvent(context, "info", "run_finished", "MR review run finished.", { finalStatus: "commented" });
       return true;
     } catch (error) {
+      if (isCancellationError(error, signal)) throw error;
       await this.state.failRun(runId, error);
       await this.recordEvent(context, "error", "run_failed", "MR review run failed.", { error: errorMessage(error) });
       throw error;
@@ -904,8 +1028,11 @@ export class ReviewWorker {
     representative: Pick<ProjectRow, "id">,
     mr: GitLabMergeRequest,
     headSha: string,
-    source: ReviewLogSource
+    source: ReviewLogSource,
+    signal?: AbortSignal,
+    checkCancellation?: CancellationCheck
   ): Promise<boolean> {
+    await ensureNotCanceled(signal, checkCancellation);
     const lockKey = `mr:${gitlabProject.id}:${mr.iid}:${headSha}`;
     if (!(await this.state.acquireLock(lockKey))) return false;
     const runId = await this.state.startSharedRun(gitlabProject.id, representative.id, mr.iid, headSha);
@@ -919,22 +1046,34 @@ export class ReviewWorker {
         defaultBranch: gitlabProject.defaultBranch
       });
       await this.recordEvent(context, "info", "lock_acquired", "Review lock acquired.");
+      await ensureNotCanceled(signal, checkCancellation);
       const diffs = await client.listMergeRequestDiffs(gitlabProject.gitlabProjectId, mr.iid);
-      const formatted = formatDiffForReview(projectDisplayName(gitlabProject), mr, diffs, this.config.maxDiffBytes);
+      const reviewConfig = await this.loadSharedReviewConfig(context, gitlabProject.id, diffs);
+      const reviewableDiffs = filterDiffsForReview(diffs, reviewConfig.pathFilters);
+      const formatted = formatDiffForReview(projectDisplayName(gitlabProject), mr, reviewableDiffs, this.config.maxDiffBytes);
       await this.recordEvent(context, "info", "diff_fetched", "GitLab MR diff fetched.", {
         diffFileCount: diffs.length,
+        reviewableFileCount: reviewableDiffs.length,
         truncated: formatted.truncated,
         omittedFiles: formatted.omittedFiles
       });
       const checkout = await this.checkoutWorkspace(context, gitlabProject, botToken, headSha);
-      const reviewInput = buildMrReviewInput(projectDisplayName(gitlabProject), mr, headSha, formatted.text, checkout.path);
-      const { runtimeSettings, resolution } = await this.resolveRuntimeSettings(context, gitlabProject.reviewStrategy, reviewInput, formatted, diffs);
-      await this.recordEvent(context, "info", "codex_started", "Codex review started.", codexStartMetadata(runtimeSettings, resolution));
+      const reviewInput = await this.enhanceReviewInput(
+        context,
+        buildMrReviewInput(projectDisplayName(gitlabProject), mr, headSha, formatted.text, checkout.path),
+        reviewConfig,
+        reviewableDiffs,
+        checkout.path
+      );
+      const { runtimeSettings, resolution } = await this.resolveRuntimeSettings(context, gitlabProject.reviewStrategy, reviewInput, formatted, reviewableDiffs, signal);
+      await this.recordEvent(context, "info", "codex_started", "Codex review started.", codexStartMetadata(runtimeSettings, resolution, this.config.codexSandboxMode));
       const result = await this.reviewer.review(
         reviewInput,
         (event) => this.recordEvent(context, event.level, event.step, event.message, event.metadata),
-        runtimeSettings
+        runtimeSettings,
+        { signal }
       );
+      await ensureNotCanceled(signal, checkCancellation);
       await this.recordEvent(context, "info", "codex_finished", "Codex review finished.", {
         hasFindings: result.hasFindings,
         responseBytes: Buffer.byteLength(result.raw, "utf8"),
@@ -942,8 +1081,9 @@ export class ReviewWorker {
         shouldPostComment: result.structured.shouldPostComment
       });
       if (!result.hasFindings) {
+        await ensureNotCanceled(signal, checkCancellation);
         const comment = await publishReviewNote(client, gitlabProject.gitlabProjectId, mr.iid, headSha, result.markdown);
-        await this.state.finishNoFindings(runId, result.markdown, comment);
+        await this.state.finishNoFindings(runId, result.markdown, comment, result.structured);
         await this.recordEvent(context, "info", "no_findings", "Codex completed with no actionable findings; summary comment was posted to GitLab.");
         await this.recordEvent(context, "info", "comment_posted", "GitLab MR review summary comment posted.", {
           commentId: comment.id,
@@ -953,8 +1093,14 @@ export class ReviewWorker {
         return true;
       }
 
+      await ensureNotCanceled(signal, checkCancellation);
+      await this.publishInlineReviewComments(context, client, gitlabProject.gitlabProjectId, mr, headSha, reviewableDiffs, [
+        ...result.structured.criticalIssues,
+        ...result.structured.potentialIssues
+      ]);
+      await ensureNotCanceled(signal, checkCancellation);
       const comment = await publishReviewNote(client, gitlabProject.gitlabProjectId, mr.iid, headSha, result.markdown);
-      await this.state.finishCommented(runId, comment, result.markdown);
+      await this.state.finishCommented(runId, comment, result.markdown, result.structured);
       await this.recordEvent(context, "info", "comment_posted", "GitLab MR review comment posted.", {
         commentId: comment.id,
         skippedExistingComment: comment.skipped
@@ -962,6 +1108,7 @@ export class ReviewWorker {
       await this.recordEvent(context, "info", "run_finished", "MR review run finished.", { finalStatus: "commented" });
       return true;
     } catch (error) {
+      if (isCancellationError(error, signal)) throw error;
       await this.state.failRun(runId, error);
       await this.recordEvent(context, "error", "run_failed", "MR review run failed.", { error: errorMessage(error) });
       throw error;
@@ -979,8 +1126,11 @@ export class ReviewWorker {
     branchName: string | null,
     commit: GitLabCommit,
     trigger: CommitReviewTrigger,
-    source: ReviewLogSource
+    source: ReviewLogSource,
+    signal?: AbortSignal,
+    checkCancellation?: CancellationCheck
   ): Promise<boolean> {
+    await ensureNotCanceled(signal, checkCancellation);
     const lockKey = `commit:${userId}:${gitlabProjectId}:${commit.id}`;
     if (!(await this.state.acquireLock(lockKey))) return false;
     const runId = await this.state.startCommitRun(userId, project?.id ?? null, gitlabProjectId, branchName, commit, trigger);
@@ -989,21 +1139,33 @@ export class ReviewWorker {
     try {
       await this.recordEvent(context, "info", "run_started", "Commit review run started.", { branchName, trigger, projectDbId: project?.id ?? null });
       await this.recordEvent(context, "info", "lock_acquired", "Review lock acquired.");
+      await ensureNotCanceled(signal, checkCancellation);
       const diffs = await client.listCommitDiffs(gitlabProjectId, commit.id);
-      const formatted = formatCommitDiffForReview(project?.displayName ?? gitlabProjectId, commit, branchName, diffs, this.config.maxDiffBytes);
+      const reviewConfig = await this.loadProjectReviewConfig(context, project, diffs);
+      const reviewableDiffs = filterDiffsForReview(diffs, reviewConfig.pathFilters);
+      const formatted = formatCommitDiffForReview(project?.displayName ?? gitlabProjectId, commit, branchName, reviewableDiffs, this.config.maxDiffBytes);
       await this.recordEvent(context, "info", "diff_fetched", "GitLab commit diff fetched.", {
         diffFileCount: diffs.length,
+        reviewableFileCount: reviewableDiffs.length,
         truncated: formatted.truncated,
         omittedFiles: formatted.omittedFiles
       });
-      const reviewInput = buildCommitReviewInput(project?.displayName ?? gitlabProjectId, commit, branchName, formatted.text, null);
-      const { runtimeSettings, resolution } = await this.resolveRuntimeSettings(context, project?.reviewStrategy ?? "balanced", reviewInput, formatted, diffs);
-      await this.recordEvent(context, "info", "codex_started", "Codex review started.", codexStartMetadata(runtimeSettings, resolution));
+      const reviewInput = await this.enhanceReviewInput(
+        context,
+        buildCommitReviewInput(project?.displayName ?? gitlabProjectId, commit, branchName, formatted.text, null),
+        reviewConfig,
+        reviewableDiffs,
+        null
+      );
+      const { runtimeSettings, resolution } = await this.resolveRuntimeSettings(context, project?.reviewStrategy ?? "balanced", reviewInput, formatted, reviewableDiffs, signal);
+      await this.recordEvent(context, "info", "codex_started", "Codex review started.", codexStartMetadata(runtimeSettings, resolution, this.config.codexSandboxMode));
       const result = await this.reviewer.review(
         reviewInput,
         (event) => this.recordEvent(context, event.level, event.step, event.message, event.metadata),
-        runtimeSettings
+        runtimeSettings,
+        { signal }
       );
+      await ensureNotCanceled(signal, checkCancellation);
       await this.recordEvent(context, "info", "codex_finished", "Codex review finished.", {
         hasFindings: result.hasFindings,
         responseBytes: Buffer.byteLength(result.raw, "utf8"),
@@ -1011,8 +1173,9 @@ export class ReviewWorker {
         shouldPostComment: result.structured.shouldPostComment
       });
       if (!result.hasFindings) {
+        await ensureNotCanceled(signal, checkCancellation);
         const comment = await publishCommitReviewNote(client, gitlabProjectId, commit.id, result.markdown);
-        await this.state.finishCommitNoFindings(runId, result.markdown, comment);
+        await this.state.finishCommitNoFindings(runId, result.markdown, comment, result.structured);
         await this.recordEvent(context, "info", "no_findings", "Codex completed with no actionable findings; summary comment was posted to GitLab.");
         await this.recordEvent(context, "info", "comment_posted", "GitLab commit review summary comment posted.", {
           commentId: comment.id,
@@ -1022,8 +1185,9 @@ export class ReviewWorker {
         return true;
       }
 
+      await ensureNotCanceled(signal, checkCancellation);
       const comment = await publishCommitReviewNote(client, gitlabProjectId, commit.id, result.markdown);
-      await this.state.finishCommitCommented(runId, comment, result.markdown);
+      await this.state.finishCommitCommented(runId, comment, result.markdown, result.structured);
       await this.recordEvent(context, "info", "comment_posted", "GitLab commit review comment posted.", {
         commentId: comment.id,
         skippedExistingComment: comment.skipped
@@ -1031,6 +1195,7 @@ export class ReviewWorker {
       await this.recordEvent(context, "info", "run_finished", "Commit review run finished.", { finalStatus: "commented" });
       return true;
     } catch (error) {
+      if (isCancellationError(error, signal)) throw error;
       await this.state.failCommitRun(runId, error);
       await this.recordEvent(context, "error", "run_failed", "Commit review run failed.", { error: errorMessage(error) });
       throw error;
@@ -1048,8 +1213,12 @@ export class ReviewWorker {
     branchName: string | null,
     commit: GitLabCommit,
     trigger: CommitReviewTrigger,
-    source: ReviewLogSource
+    source: ReviewLogSource,
+    reviewStrategyOverride: ReviewStrategy | null = null,
+    signal?: AbortSignal,
+    checkCancellation?: CancellationCheck
   ): Promise<boolean> {
+    await ensureNotCanceled(signal, checkCancellation);
     const lockKey = `commit:${gitlabProject.id}:${commit.id}`;
     if (!(await this.state.acquireLock(lockKey))) return false;
     const runId = await this.state.startSharedCommitRun(
@@ -1059,7 +1228,9 @@ export class ReviewWorker {
       gitlabProject.gitlabProjectId,
       branchName,
       commit,
-      trigger
+      trigger,
+      "running",
+      reviewStrategyOverride
     );
     const context: EventContext = { source, runType: "commit", runId, project: gitlabProject.gitlabProjectId, sha: commit.id };
 
@@ -1067,6 +1238,7 @@ export class ReviewWorker {
       await this.recordEvent(context, "info", "run_started", "Commit review run started.", {
         branchName,
         trigger,
+        reviewStrategy: reviewStrategyOverride ?? gitlabProject.reviewStrategy,
         sharedProjectId: gitlabProject.id
       });
       await this.recordEvent(context, "info", "bot_token_loaded", "Reviewer bot token loaded for GitLab review actions.");
@@ -1075,22 +1247,35 @@ export class ReviewWorker {
         defaultBranch: gitlabProject.defaultBranch
       });
       await this.recordEvent(context, "info", "lock_acquired", "Review lock acquired.");
+      await ensureNotCanceled(signal, checkCancellation);
       const diffs = await client.listCommitDiffs(gitlabProject.gitlabProjectId, commit.id);
-      const formatted = formatCommitDiffForReview(projectDisplayName(gitlabProject), commit, branchName, diffs, this.config.maxDiffBytes);
+      const reviewConfig = await this.loadSharedReviewConfig(context, gitlabProject.id, diffs);
+      const reviewableDiffs = filterDiffsForReview(diffs, reviewConfig.pathFilters);
+      const formatted = formatCommitDiffForReview(projectDisplayName(gitlabProject), commit, branchName, reviewableDiffs, this.config.maxDiffBytes);
       await this.recordEvent(context, "info", "diff_fetched", "GitLab commit diff fetched.", {
         diffFileCount: diffs.length,
+        reviewableFileCount: reviewableDiffs.length,
         truncated: formatted.truncated,
         omittedFiles: formatted.omittedFiles
       });
       const checkout = await this.checkoutWorkspace(context, gitlabProject, botToken, commit.id);
-      const reviewInput = buildCommitReviewInput(projectDisplayName(gitlabProject), commit, branchName, formatted.text, checkout.path);
-      const { runtimeSettings, resolution } = await this.resolveRuntimeSettings(context, gitlabProject.reviewStrategy, reviewInput, formatted, diffs);
-      await this.recordEvent(context, "info", "codex_started", "Codex review started.", codexStartMetadata(runtimeSettings, resolution));
+      const reviewInput = await this.enhanceReviewInput(
+        context,
+        buildCommitReviewInput(projectDisplayName(gitlabProject), commit, branchName, formatted.text, checkout.path),
+        reviewConfig,
+        reviewableDiffs,
+        checkout.path
+      );
+      const selectedStrategy = reviewStrategyOverride ?? gitlabProject.reviewStrategy;
+      const { runtimeSettings, resolution } = await this.resolveRuntimeSettings(context, selectedStrategy, reviewInput, formatted, reviewableDiffs, signal);
+      await this.recordEvent(context, "info", "codex_started", "Codex review started.", codexStartMetadata(runtimeSettings, resolution, this.config.codexSandboxMode));
       const result = await this.reviewer.review(
         reviewInput,
         (event) => this.recordEvent(context, event.level, event.step, event.message, event.metadata),
-        runtimeSettings
+        runtimeSettings,
+        { signal }
       );
+      await ensureNotCanceled(signal, checkCancellation);
       await this.recordEvent(context, "info", "codex_finished", "Codex review finished.", {
         hasFindings: result.hasFindings,
         responseBytes: Buffer.byteLength(result.raw, "utf8"),
@@ -1098,8 +1283,9 @@ export class ReviewWorker {
         shouldPostComment: result.structured.shouldPostComment
       });
       if (!result.hasFindings) {
+        await ensureNotCanceled(signal, checkCancellation);
         const comment = await publishCommitReviewNote(client, gitlabProject.gitlabProjectId, commit.id, result.markdown);
-        await this.state.finishCommitNoFindings(runId, result.markdown, comment);
+        await this.state.finishCommitNoFindings(runId, result.markdown, comment, result.structured);
         await this.recordEvent(context, "info", "no_findings", "Codex completed with no actionable findings; summary comment was posted to GitLab.");
         await this.recordEvent(context, "info", "comment_posted", "GitLab commit review summary comment posted.", {
           commentId: comment.id,
@@ -1109,8 +1295,9 @@ export class ReviewWorker {
         return true;
       }
 
+      await ensureNotCanceled(signal, checkCancellation);
       const comment = await publishCommitReviewNote(client, gitlabProject.gitlabProjectId, commit.id, result.markdown);
-      await this.state.finishCommitCommented(runId, comment, result.markdown);
+      await this.state.finishCommitCommented(runId, comment, result.markdown, result.structured);
       await this.recordEvent(context, "info", "comment_posted", "GitLab commit review comment posted.", {
         commentId: comment.id,
         skippedExistingComment: comment.skipped
@@ -1118,6 +1305,7 @@ export class ReviewWorker {
       await this.recordEvent(context, "info", "run_finished", "Commit review run finished.", { finalStatus: "commented" });
       return true;
     } catch (error) {
+      if (isCancellationError(error, signal)) throw error;
       await this.state.failCommitRun(runId, error);
       await this.recordEvent(context, "error", "run_failed", "Commit review run failed.", { error: errorMessage(error) });
       throw error;
@@ -1126,13 +1314,148 @@ export class ReviewWorker {
     }
   }
 
+  private async loadSharedReviewConfig(context: EventContext, gitlabProjectRefId: number, diffs: GitLabDiff[]): Promise<ProjectReviewConfig> {
+    const config = await this.state.getSharedProjectReviewConfig(gitlabProjectRefId);
+    const changedFiles = changedFilesFromDiffs(diffs);
+    const matchedInstructions = matchReviewInstructions(config.instructions, changedFiles, config.pathFilters);
+    const reviewableFiles = filterChangedFiles(changedFiles, config.pathFilters);
+    await this.recordEvent(context, "info", "project_instructions_loaded", "Project review instructions loaded.", {
+      reviewProfile: config.reviewProfile,
+      pathFilterCount: config.pathFilters.length,
+      instructionCount: config.instructions.length,
+      matchedInstructionCount: matchedInstructions.length,
+      changedFileCount: changedFiles.length,
+      reviewableFileCount: reviewableFiles.length
+    });
+    return config;
+  }
+
+  private async loadProjectReviewConfig(context: EventContext, project: ProjectRow | null, diffs: GitLabDiff[]): Promise<ProjectReviewConfig> {
+    const config = project?.gitlabProjectRefId
+      ? await this.state.getSharedProjectReviewConfig(project.gitlabProjectRefId)
+      : {
+          reviewProfile: "assertive" as const,
+          pathFilters: defaultPathFilters(),
+          instructions: []
+        };
+    const changedFiles = changedFilesFromDiffs(diffs);
+    const matchedInstructions = matchReviewInstructions(config.instructions, changedFiles, config.pathFilters);
+    const reviewableFiles = filterChangedFiles(changedFiles, config.pathFilters);
+    await this.recordEvent(context, "info", "project_instructions_loaded", "Project review instructions loaded.", {
+      reviewProfile: config.reviewProfile,
+      pathFilterCount: config.pathFilters.length,
+      instructionCount: config.instructions.length,
+      matchedInstructionCount: matchedInstructions.length,
+      changedFileCount: changedFiles.length,
+      reviewableFileCount: reviewableFiles.length
+    });
+    return config;
+  }
+
+  private async enhanceReviewInput(
+    context: EventContext,
+    input: ReviewPromptInput,
+    config: ProjectReviewConfig,
+    diffs: GitLabDiff[],
+    workingDirectory: string | null
+  ): Promise<ReviewPromptInput> {
+    const changedFiles = filterChangedFiles(changedFilesFromDiffs(diffs), config.pathFilters);
+    const matchedInstructions = matchReviewInstructions(config.instructions, changedFiles, config.pathFilters);
+    const toolFindings = workingDirectory
+      ? await this.runReadonlyTools(context, workingDirectory, changedFiles)
+      : [];
+    return {
+      ...input,
+      changedFiles,
+      pathFilters: config.pathFilters,
+      matchedInstructions,
+      toolFindings,
+      reviewProfile: config.reviewProfile
+    };
+  }
+
+  private async runReadonlyTools(context: EventContext, workingDirectory: string, changedFiles: string[]): Promise<PromptToolFinding[]> {
+    await this.recordEvent(context, "info", "tool_runner_started", "Read-only static analysis started.", {
+      toolCount: 4,
+      changedFileCount: changedFiles.length
+    });
+    try {
+      const events = await this.toolRunner.run({ workingDirectory, changedFiles });
+      for (const event of events) {
+        await this.recordToolRunnerEvent(context, event);
+      }
+      return events.flatMap((event) => event.findings).slice(0, 50);
+    } catch (error) {
+      await this.recordEvent(context, "warn", "tool_runner_failed", "Read-only static analysis failed.", {
+        error: errorMessage(error)
+      });
+      return [];
+    }
+  }
+
+  private async recordToolRunnerEvent(context: EventContext, event: ToolRunnerEvent): Promise<void> {
+    await this.recordEvent(
+      context,
+      event.status === "failed" ? "warn" : "info",
+      event.status === "failed" ? "tool_runner_failed" : "tool_runner_result",
+      event.summary,
+      {
+        tool: event.tool,
+        status: event.status,
+        findingCount: event.findings.length,
+        durationMs: event.durationMs,
+        outputBytes: event.outputBytes,
+        outputPreview: event.outputPreview,
+        outputTruncated: event.outputTruncated,
+        findings: event.findings.slice(0, 10)
+      }
+    );
+  }
+
+  private async publishInlineReviewComments(
+    context: EventContext,
+    client: GitLabClient,
+    gitlabProjectId: string,
+    mr: GitLabMergeRequest,
+    headSha: string,
+    diffs: GitLabDiff[],
+    issues: ReviewIssue[]
+  ): Promise<void> {
+    const inlineIssues = issues.filter((issue) => issue.file && issue.line).length;
+    if (!inlineIssues) return;
+    try {
+      const detailedMr = mr.diff_refs ? mr : await client.getMergeRequest(gitlabProjectId, mr.iid);
+      const results = await publishMergeRequestInlineComments(client, gitlabProjectId, mr.iid, headSha, detailedMr, diffs, issues);
+      for (const result of results) {
+        await this.recordEvent(
+          context,
+          result.status === "posted" || result.status === "skipped_existing" ? "info" : "warn",
+          result.status === "posted" || result.status === "skipped_existing" ? "inline_comment_posted" : "inline_comment_failed",
+          result.status === "posted"
+            ? "GitLab inline review comment posted."
+            : result.status === "skipped_existing"
+              ? "GitLab inline review comment already existed."
+              : "GitLab inline review comment could not be posted.",
+          result
+        );
+      }
+    } catch (error) {
+      await this.recordEvent(context, "warn", "inline_comment_failed", "GitLab inline review comments failed.", {
+        error: errorMessage(error),
+        issueCount: inlineIssues
+      });
+    }
+  }
+
   private async resolveRuntimeSettings(
     context: EventContext,
     strategy: ReviewStrategy,
     reviewInput: ReviewPromptInput,
     formatted: FormattedDiff,
-    diffs: GitLabDiff[]
+    diffs: GitLabDiff[],
+    signal?: AbortSignal
   ): Promise<{ runtimeSettings: CodexReviewRuntimeSettings; resolution: ReviewStrategyResolution }> {
+    throwIfCanceled(signal);
     const modelSettings = await this.reviewSettings.getEffectiveReviewSettings();
 
     if (strategy !== "auto") {
@@ -1147,6 +1470,7 @@ export class ReviewWorker {
     await this.recordEvent(context, "info", "codex_triage_started", "Codex triage started for auto review strategy.", {
       model: modelSettings.model,
       modelReasoningEffort: "medium",
+      sandboxMode: this.config.codexSandboxMode,
       reviewStrategy: strategy,
       diffBytes: Buffer.byteLength(formatted.text, "utf8"),
       diffFileCount: diffs.length,
@@ -1163,7 +1487,8 @@ export class ReviewWorker {
           diffTruncated: formatted.truncated,
           omittedFiles: formatted.omittedFiles
         },
-        modelSettings
+        modelSettings,
+        { signal }
       );
       const resolution: ReviewStrategyResolution = {
         configuredStrategy: "auto",
@@ -1186,6 +1511,7 @@ export class ReviewWorker {
       });
       return { runtimeSettings: settings, resolution };
     } catch (error) {
+      if (isCancellationError(error, signal)) throw error;
       const resolution: ReviewStrategyResolution = {
         configuredStrategy: "auto",
         effectiveReasoningEffort: "high",
@@ -1282,11 +1608,16 @@ function projectDisplayName(project: GitlabProjectRow): string {
   return project.nameWithNamespace ?? project.pathWithNamespace ?? project.gitlabProjectId;
 }
 
-function codexStartMetadata(settings: CodexReviewRuntimeSettings, resolution: ReviewStrategyResolution): Record<string, unknown> {
+function codexStartMetadata(
+  settings: CodexReviewRuntimeSettings,
+  resolution: ReviewStrategyResolution,
+  sandboxMode: string
+): Record<string, unknown> {
   return {
     promptVersion: REVIEW_PROMPT_VERSION,
     model: settings.model,
     modelReasoningEffort: settings.reasoningEffort,
+    sandboxMode,
     ...strategyMetadata(settings, resolution)
   };
 }
@@ -1359,6 +1690,11 @@ function changedFilesFromDiffs(diffs: GitLabDiff[]): string[] {
   ).slice(0, 200);
 }
 
+function filterDiffsForReview(diffs: GitLabDiff[], pathFilters: string[]): GitLabDiff[] {
+  const reviewableFiles = new Set(filterChangedFiles(changedFilesFromDiffs(diffs), pathFilters));
+  return diffs.filter((diff) => reviewableFiles.has(diff.new_path) || reviewableFiles.has(diff.old_path));
+}
+
 function timestampForCommit(commit: GitLabCommit): number {
   const value = commit.committed_date ?? commit.created_at;
   return value ? Date.parse(value) || 0 : 0;
@@ -1387,4 +1723,21 @@ function numberFromPayload(payload: Record<string, unknown>, key: string): numbe
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function throwIfCanceled(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new ReviewCanceledError();
+}
+
+async function ensureNotCanceled(signal?: AbortSignal, checkCancellation?: CancellationCheck): Promise<void> {
+  throwIfCanceled(signal);
+  if (checkCancellation) await checkCancellation();
+  throwIfCanceled(signal);
+}
+
+function isCancellationError(error: unknown, signal?: AbortSignal): boolean {
+  if (signal?.aborted) return true;
+  if (error instanceof ReviewCanceledError) return true;
+  if (error instanceof Error && (error.name === "AbortError" || error.message.toLowerCase().includes("abort"))) return true;
+  return false;
 }

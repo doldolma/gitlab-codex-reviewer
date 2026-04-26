@@ -27,10 +27,12 @@ export const gitlabWebhooks = new GitLabWebhookService(config, reviewState, revi
 export const codexReviewSettings = new CodexReviewSettingsService(prisma);
 export const reviewEngine = new CodexReviewEngine({
   codexBin: config.codexBin,
-  codexHome: config.codexHome
+  codexHome: config.codexHome,
+  sandboxMode: config.codexSandboxMode
 });
 export const reviewTriageEngine = new CodexReviewTriageEngine({
   codexBin: config.codexBin,
-  codexHome: config.codexHome
+  codexHome: config.codexHome,
+  sandboxMode: config.codexSandboxMode
 });
 export const reviewWorker = new ReviewWorker(config, gitlabOAuth, reviewState, reviewerBot, reviewEngine, reviewTriageEngine, codexReviewSettings);

@@ -1,4 +1,4 @@
-export const REVIEW_PROMPT_VERSION = "ko-workspace-review-v3";
+export const REVIEW_PROMPT_VERSION = "ko-workspace-review-v4";
 
 export type ReviewPromptKind = "merge_request" | "commit";
 export type ReviewAssessment = "safe" | "risky" | "needs_revision";
@@ -14,6 +14,8 @@ export type ReviewCategory =
   | "performance"
   | "testing"
   | "maintainability";
+
+export type ReviewProfile = "chill" | "assertive";
 
 export type ReviewIssue = {
   severity: ReviewSeverity;
@@ -45,9 +47,25 @@ export type FlowSummaryStep = {
   caution: string | null;
 };
 
+export type PromptToolFinding = {
+  tool: string;
+  severity: "info" | "low" | "medium" | "high";
+  title: string;
+  file: string | null;
+  line: number | null;
+  summary: string;
+};
+
+export type PromptReviewInstruction = {
+  pathGlob: string;
+  instructions: string;
+  matchedFiles: string[];
+};
+
 export type StructuredReview = {
   reviewLanguage: "ko-KR";
   assessment: ReviewAssessment;
+  changeIntent: string;
   reviewEffort: ReviewEffort;
   changedFilesSummary: ChangedFileSummary[];
   riskAreas: string[];
@@ -58,6 +76,8 @@ export type StructuredReview = {
   testSuggestions: string[];
   notes: string[];
   flowSummary: FlowSummaryStep[];
+  toolFindingsUsed: string[];
+  confidenceReason: string;
   shouldPostComment: boolean;
   commentReason: string;
 };
@@ -71,6 +91,11 @@ export type ReviewPromptInput = {
   branchName?: string | null;
   diffText: string;
   workingDirectory?: string | null;
+  changedFiles?: string[];
+  matchedInstructions?: PromptReviewInstruction[];
+  pathFilters?: string[];
+  toolFindings?: PromptToolFinding[];
+  reviewProfile?: ReviewProfile;
 };
 
 const issueSchema = {
@@ -122,6 +147,7 @@ export const REVIEW_OUTPUT_SCHEMA = {
   properties: {
     reviewLanguage: { type: "string", enum: ["ko-KR"] },
     assessment: { type: "string", enum: ["safe", "risky", "needs_revision"] },
+    changeIntent: { type: "string" },
     reviewEffort: {
       type: "object",
       additionalProperties: false,
@@ -140,12 +166,15 @@ export const REVIEW_OUTPUT_SCHEMA = {
     testSuggestions: { type: "array", items: { type: "string" } },
     notes: { type: "array", items: { type: "string" } },
     flowSummary: { type: "array", items: flowSummaryStepSchema },
+    toolFindingsUsed: { type: "array", items: { type: "string" } },
+    confidenceReason: { type: "string" },
     shouldPostComment: { type: "boolean" },
     commentReason: { type: "string" }
   },
   required: [
     "reviewLanguage",
     "assessment",
+    "changeIntent",
     "reviewEffort",
     "changedFilesSummary",
     "riskAreas",
@@ -156,6 +185,8 @@ export const REVIEW_OUTPUT_SCHEMA = {
     "testSuggestions",
     "notes",
     "flowSummary",
+    "toolFindingsUsed",
+    "confidenceReason",
     "shouldPostComment",
     "commentReason"
   ]
@@ -163,6 +194,10 @@ export const REVIEW_OUTPUT_SCHEMA = {
 
 export function buildReviewPrompt(input: ReviewPromptInput): string {
   const reviewType = input.kind === "commit" ? "GitLab commit" : "GitLab Merge Request";
+  const profile = input.reviewProfile ?? "assertive";
+  const profileLine = profile === "chill"
+    ? "Review profile: chill. Comment only on concrete correctness, security, data loss, or high-confidence regression risks. Keep maintainability suggestions conservative."
+    : "Review profile: assertive. Explore broadly and flag meaningful maintainability, testing, performance, concurrency, and contract risks when evidence-backed.";
   const workspaceLine = input.workingDirectory
     ? "You are running inside the checked-out Git repository. Use read-only tools to inspect repository guidelines, changed files, callers, usages, schemas, contracts, configuration, and tests."
     : "A repository workspace is not available. Review only from the provided diff and explicitly note that repository exploration was unavailable.";
@@ -175,6 +210,7 @@ Your review language is fixed to Korean (ko-KR). Every human-readable JSON strin
 Review style:
 - Be assertive but high-signal. Explore broadly, but only classify evidence-backed actionable findings as issues.
 - Focus on correctness, regressions, side effects, security, data loss, API/schema/contract compatibility, concurrency, error handling, performance, maintainability, and missing tests.
+- Start by identifying the change intent and impact context. Explain what this commit or merge request is trying to change, not just which files changed.
 - Avoid praise, generic advice, style-only comments, speculative concerns, and nitpicks.
 - A finding must be supported by the diff or read-only repository exploration.
 - If an issue is uncertain, put it in notes instead of criticalIssues or potentialIssues.
@@ -199,6 +235,19 @@ Head: ${input.headRef ?? "unknown"}
 SHA: ${input.sha}
 Branch: ${input.branchName ?? "unknown"}
 Prompt version: ${REVIEW_PROMPT_VERSION}
+${profileLine}
+
+## Changed Files
+${renderPromptList(input.changedFiles ?? [], "No changed file list was provided.")}
+
+## App Path Filters
+${renderPromptList(input.pathFilters ?? [], "No app-level path filters were configured.")}
+
+## App Path Instructions
+${renderPromptInstructions(input.matchedInstructions ?? [])}
+
+## Static Analysis / Tool Findings
+${renderPromptToolFindings(input.toolFindings ?? [])}
 
 ## Diff
 \`\`\`diff
@@ -207,21 +256,24 @@ ${input.diffText}
 
 ## Required Review Process
 Follow this process before producing the final JSON:
-1. Understand the intent of the change from the diff.
-2. Produce a concise changed-files summary and estimate review effort from 1 to 5.
-3. If a workspace exists, look for repository guidance such as AGENTS.md, README, CONTRIBUTING, .coderabbit.yaml/.coderabbit.yml, pull request templates, architecture notes, test docs, and config docs.
-4. Inspect changed files and relevant surrounding code.
-5. Use rg or similar read-only search to inspect callers, usages, API/schema/contract references, related tests, and configuration when relevant.
-6. Check for bugs, regressions, security risks, data loss, API contract breaks, concurrency issues, error handling gaps, performance regressions, maintainability risks, and missing tests.
-7. Self-check every issue:
+1. Understand the intent of the change from the diff and workspace context. Identify whether the main context is feature behavior, UI/UX, performance, reliability, operations, refactoring, API/schema contract, or tests.
+2. Write changeIntent as one or two concise Korean sentences that explain the purpose and user/system impact of the change. If the purpose is not clear, do not guess; describe only the observable change and say the intent is not fully clear from the diff.
+3. Produce a concise changed-files summary and estimate review effort from 1 to 5.
+4. If a workspace exists, look for repository guidance such as AGENTS.md, README, CONTRIBUTING, .coderabbit.yaml/.coderabbit.yml, pull request templates, architecture notes, test docs, and config docs.
+5. Inspect changed files and relevant surrounding code.
+6. Use rg or similar read-only search to inspect callers, usages, API/schema/contract references, related tests, and configuration when relevant.
+7. Check for bugs, regressions, security risks, data loss, API contract breaks, concurrency issues, error handling gaps, performance regressions, maintainability risks, and missing tests.
+8. Review tool findings as leads, not as facts. Confirm each relevant tool finding by checking the diff or workspace before promoting it to an issue.
+9. Respect app path filters and app path instructions when deciding what to review and how to judge the change.
+10. Self-check every issue:
    - Is it actionable for a maintainer?
    - Is the failure mode or risk concrete?
    - Is there evidence from the diff or repository?
    - Can you include a file and line reference when possible?
-8. Put blocking/high-confidence bugs in criticalIssues.
-9. Put meaningful non-blocking risks or edge cases in potentialIssues.
-10. Put non-blocking improvements in suggestions only.
-11. Put broad uncertainty or context observations in notes only.
+11. Put blocking/high-confidence bugs in criticalIssues.
+12. Put meaningful non-blocking risks or edge cases in potentialIssues.
+13. Put non-blocking improvements in suggestions only.
+14. Put broad uncertainty or context observations in notes only.
 
 ## Output Contract
 Return JSON matching the provided schema.
@@ -229,6 +281,7 @@ Return JSON matching the provided schema.
 Schema semantics:
 - reviewLanguage MUST be "ko-KR".
 - assessment is "safe", "risky", or "needs_revision".
+- changeIntent explains the purpose and user/system impact context of the change in one or two concise Korean sentences. It is not a file list.
 - reviewEffort.score is 1 for trivial and 5 for very complex.
 - changedFilesSummary summarizes changed files or grouped related files.
 - riskAreas lists concrete risk themes in Korean.
@@ -237,6 +290,8 @@ Schema semantics:
 - suggestions contains non-blocking improvements; suggestions alone should not make shouldPostComment true.
 - testSuggestions contains missing tests or edge cases worth covering.
 - flowSummary contains short runtime/API/event-flow steps only when the change affects interactions, APIs, events, async workflows, or lifecycle order. Otherwise return [].
+- toolFindingsUsed lists the tool finding titles that materially influenced your review result. Return [] if none were confirmed.
+- confidenceReason explains why your final review confidence is sufficient or limited.
 - shouldPostComment means "there are actionable findings", not whether the service will post a completion summary.
 - shouldPostComment is true only when maintainers should act on criticalIssues or potentialIssues.
 - shouldPostComment is false when there are no actionable findings, even if summary, notes, suggestions, or testSuggestions are present. The service can still post a concise completion summary.
@@ -252,6 +307,7 @@ export function parseStructuredReview(raw: string): StructuredReview {
   return {
     reviewLanguage: parseReviewLanguage(parsed.reviewLanguage),
     assessment: parseAssessment(parsed.assessment),
+    changeIntent: parseChangeIntent(parsed.changeIntent, parsed.summary),
     reviewEffort: parseReviewEffort(parsed.reviewEffort),
     changedFilesSummary: parseChangedFilesSummary(parsed.changedFilesSummary),
     riskAreas: parseStringArray(parsed.riskAreas, "riskAreas"),
@@ -262,6 +318,8 @@ export function parseStructuredReview(raw: string): StructuredReview {
     testSuggestions: parseStringArray(parsed.testSuggestions, "testSuggestions"),
     notes: parseStringArray(parsed.notes, "notes"),
     flowSummary: parseFlowSummary(parsed.flowSummary),
+    toolFindingsUsed: parseStringArray(parsed.toolFindingsUsed, "toolFindingsUsed"),
+    confidenceReason: parseString(parsed.confidenceReason, "confidenceReason"),
     shouldPostComment: parseBoolean(parsed.shouldPostComment, "shouldPostComment"),
     commentReason: parseString(parsed.commentReason, "commentReason")
   };
@@ -295,8 +353,47 @@ export function renderReviewMarkdown(review: StructuredReview): string {
     sections.push("", "### :twisted_rightwards_arrows: 흐름 요약", renderFlowSummaryTable(review.flowSummary));
   }
 
-  sections.push("", "### :memo: 참고", renderStringTable([...review.riskAreas.map((area) => `위험 영역: ${area}`), ...review.notes], "추가 참고 없음."));
+  sections.push(
+    "",
+    "### :memo: 참고",
+    renderStringTable(
+      [
+        ...review.riskAreas.map((area) => `위험 영역: ${area}`),
+        ...review.toolFindingsUsed.map((finding) => `확인한 도구 결과: ${finding}`),
+        `신뢰도 판단: ${review.confidenceReason}`,
+        ...review.notes
+      ],
+      "추가 참고 없음."
+    )
+  );
   return sections.join("\n").trim();
+}
+
+function renderPromptList(values: string[], empty: string): string {
+  if (!values.length) return `- ${empty}`;
+  return values.slice(0, 200).map((value) => `- ${value}`).join("\n");
+}
+
+function renderPromptInstructions(values: PromptReviewInstruction[]): string {
+  if (!values.length) return "- No app-level path instructions matched this change.";
+  return values
+    .map((value, index) => [
+      `${index + 1}. Path: ${value.pathGlob}`,
+      `   Matched files: ${value.matchedFiles.join(", ")}`,
+      `   Instructions: ${value.instructions}`
+    ].join("\n"))
+    .join("\n");
+}
+
+function renderPromptToolFindings(values: PromptToolFinding[]): string {
+  if (!values.length) return "- No static analysis findings were produced.";
+  return values
+    .slice(0, 30)
+    .map((value, index) => {
+      const location = value.file ? `${value.file}${value.line ? `:${value.line}` : ""}` : "no location";
+      return `${index + 1}. [${value.severity}] ${value.tool}: ${value.title} (${location}) - ${value.summary}`;
+    })
+    .join("\n");
 }
 
 export function shouldTreatAsFindings(review: StructuredReview): boolean {
@@ -307,6 +404,7 @@ function renderSummaryTable(review: StructuredReview, hasActionableIssues: boole
   return renderTable(
     ["항목", "내용"],
     [
+      ["변경 목적", review.changeIntent],
       ["전체 평가", assessmentLabel(review.assessment)],
       ["조치 필요", hasActionableIssues ? "있음" : "없음"],
       ["리뷰 난이도", `${review.reviewEffort.score}/5 - ${review.reviewEffort.reason}`],
@@ -476,6 +574,15 @@ function parseIssueArray(value: unknown, field: string): ReviewIssue[] {
 function parseString(value: unknown, field: string): string {
   if (typeof value !== "string") throw new Error(`Codex review response has invalid ${field}`);
   return value;
+}
+
+function parseChangeIntent(value: unknown, summary: unknown): string {
+  if (typeof value === "string" && value.trim()) return value;
+  if (Array.isArray(summary)) {
+    const firstSummary = summary.find((item): item is string => typeof item === "string" && item.trim().length > 0);
+    if (firstSummary) return firstSummary;
+  }
+  return "변경 목적 정보 없음.";
 }
 
 function parseNullableString(value: unknown, field: string): string | null {

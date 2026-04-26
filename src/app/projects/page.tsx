@@ -5,6 +5,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus } from "lucide-react";
 import { AppShell } from "../../components/app-shell";
 import { BranchMultiCombobox, GitLabProjectCombobox } from "../../components/gitlab-combobox";
+import { ProjectReviewConfigDrawer } from "../../components/project-review-config-drawer";
 import { ProjectTable } from "../../components/project-table";
 import { apiGet, apiSend, type AuthStatus, type Project, type ReviewStrategy } from "../../lib/api-client";
 
@@ -22,6 +23,7 @@ export default function ProjectsPage() {
     queryFn: () => apiGet<{ projects: Project[] }>("/api/projects")
   });
   const [resettingWebhookProjectId, setResettingWebhookProjectId] = useState<number | null>(null);
+  const [configProject, setConfigProject] = useState<Project | null>(null);
 
   const createProject = useMutation({
     mutationFn: (payload: {
@@ -84,7 +86,7 @@ export default function ProjectsPage() {
           <div>
             <span className="eyebrow">설정</span>
             <h1>Projects</h1>
-            <p>감시할 GitLab 프로젝트와 MR 리뷰 브랜치, 커밋 리뷰 브랜치를 설정합니다.</p>
+            <p>감시할 GitLab 프로젝트와 리뷰할 브랜치를 설정합니다. 비워둔 리뷰 유형은 실행하지 않습니다.</p>
           </div>
         </header>
 
@@ -100,7 +102,7 @@ export default function ProjectsPage() {
                 projectId={gitlabProjectId}
                 values={mrTargetBranches}
                 onChange={setMrTargetBranches}
-                placeholder="모든 opened MR"
+                placeholder="비활성화"
               />
             </label>
             <label>
@@ -127,9 +129,11 @@ export default function ProjectsPage() {
             onUpdateReviewStrategy={(id, reviewStrategy) => updateReviewStrategy.mutate({ id, reviewStrategy })}
             isAdmin={auth.data?.currentUser?.role === "admin"}
             onResetWebhook={(id) => resetWebhook.mutate(id)}
+            onConfigure={setConfigProject}
             resettingProjectId={resettingWebhookProjectId}
           />
         </section>
+        <ProjectReviewConfigDrawer project={configProject} onClose={() => setConfigProject(null)} />
       </div>
     </AppShell>
   );

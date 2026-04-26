@@ -13,6 +13,11 @@ export type GitLabMergeRequest = {
   state: string;
   updated_at: string;
   author?: { username?: string };
+  diff_refs?: {
+    base_sha?: string | null;
+    head_sha?: string | null;
+    start_sha?: string | null;
+  } | null;
 };
 
 export type GitLabDiff = {
@@ -51,6 +56,21 @@ export type GitLabCommitComment = {
   id?: number;
   note: string;
   web_url?: string;
+};
+
+export type GitLabDiscussion = {
+  id: string;
+  notes: GitLabNote[];
+};
+
+export type GitLabMergeRequestDiscussionInput = {
+  body: string;
+  baseSha: string;
+  startSha: string;
+  headSha: string;
+  oldPath: string;
+  newPath: string;
+  newLine: number;
 };
 
 export type GitLabProject = {
@@ -149,6 +169,12 @@ export class GitLabClient {
     });
   }
 
+  async getMergeRequest(projectId: string, mrIid: number): Promise<GitLabMergeRequest> {
+    return this.request<GitLabMergeRequest>(`/api/v4/projects/${encodeProjectId(projectId)}/merge_requests/${mrIid}`, {
+      method: "GET"
+    });
+  }
+
   async listMergeRequestNotes(projectId: string, mrIid: number): Promise<GitLabNote[]> {
     return this.paginate<GitLabNote>(`/api/v4/projects/${encodeProjectId(projectId)}/merge_requests/${mrIid}/notes`, {
       per_page: "100",
@@ -162,6 +188,31 @@ export class GitLabClient {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ body })
+    });
+  }
+
+  async listMergeRequestDiscussions(projectId: string, mrIid: number): Promise<GitLabDiscussion[]> {
+    return this.paginate<GitLabDiscussion>(`/api/v4/projects/${encodeProjectId(projectId)}/merge_requests/${mrIid}/discussions`, {
+      per_page: "100"
+    });
+  }
+
+  async createMergeRequestDiscussion(projectId: string, mrIid: number, input: GitLabMergeRequestDiscussionInput): Promise<GitLabDiscussion> {
+    return this.request<GitLabDiscussion>(`/api/v4/projects/${encodeProjectId(projectId)}/merge_requests/${mrIid}/discussions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        body: input.body,
+        position: {
+          position_type: "text",
+          base_sha: input.baseSha,
+          start_sha: input.startSha,
+          head_sha: input.headSha,
+          old_path: input.oldPath,
+          new_path: input.newPath,
+          new_line: input.newLine
+        }
+      })
     });
   }
 

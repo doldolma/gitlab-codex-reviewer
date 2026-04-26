@@ -23,10 +23,12 @@ describe("multi-user review state", () => {
     });
 
     expect(projectA.gitlabProjectId).toBe(projectB.gitlabProjectId);
-    expect(await state.listProjects(userA)).toHaveLength(1);
-    expect(await state.listProjects(userB)).toHaveLength(1);
-    expect((await state.listProjects(userA))[0]?.skipLabels).toEqual(["skip-a"]);
-    expect((await state.listProjects(userB))[0]?.skipLabels).toEqual(["skip-b"]);
+    const projectsForA = await state.listProjects(userA);
+    const projectsForB = await state.listProjects(userB);
+    expect(projectsForA).toHaveLength(2);
+    expect(projectsForB).toHaveLength(2);
+    expect(projectsForA.find((project) => project.displayName === "Alice service")?.skipLabels).toEqual(["skip-a"]);
+    expect(projectsForB.find((project) => project.displayName === "Bob service")?.skipLabels).toEqual(["skip-b"]);
     await db.$disconnect();
   });
 
@@ -117,6 +119,95 @@ describe("multi-user review state", () => {
     await db.$disconnect();
   });
 
+  it("does not treat empty MR branch settings as all branches", async () => {
+    const db = await testDb();
+    const state = new ReviewStateStore(db);
+    const userA = await insertTestUser(db, { gitlabUserId: 1, username: "alice" });
+    const userB = await insertTestUser(db, { gitlabUserId: 2, username: "bob" });
+    const shared = await state.upsertGitlabProject({
+      gitlabHost: "https://gitlab.example.com",
+      gitlabProjectId: "123",
+      pathWithNamespace: "group/service",
+      nameWithNamespace: "Group / Service"
+    });
+
+    await state.createProject(userA, {
+      gitlabProjectRefId: shared.id,
+      gitlabProjectId: "123",
+      displayName: "Alice service",
+      enabled: true,
+      skipLabels: [],
+      mrTargetBranches: [],
+      commitBranches: ["main"]
+    });
+    await state.createProject(userB, {
+      gitlabProjectRefId: shared.id,
+      gitlabProjectId: "123",
+      displayName: "Bob service",
+      enabled: true,
+      skipLabels: [],
+      mrTargetBranches: [],
+      commitBranches: ["develop"]
+    });
+
+    const groups = await state.listSharedProjectGroups();
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0]?.mrTargetBranches).toEqual([]);
+    expect(groups[0]?.commitBranches.sort()).toEqual(["develop", "main"]);
+    await db.$disconnect();
+  });
+
+  it("updates shared MR and branch watch rows without relying on nullable unique upsert", async () => {
+    const db = await testDb();
+    const state = new ReviewStateStore(db);
+    const userId = await insertTestUser(db, { gitlabUserId: 1, username: "alice" });
+    const shared = await state.upsertGitlabProject({
+      gitlabHost: "https://gitlab.example.com",
+      gitlabProjectId: "123",
+      pathWithNamespace: "group/service",
+      nameWithNamespace: "Group / Service"
+    });
+    const project = await state.createProject(userId, {
+      gitlabProjectRefId: shared.id,
+      gitlabProjectId: "123",
+      displayName: "Service",
+      enabled: true,
+      skipLabels: [],
+      mrTargetBranches: ["main"],
+      commitBranches: ["main"]
+    });
+
+    await state.upsertMergeRequestShared(shared.id, project.id, {
+      iid: 7,
+      title: "Initial title",
+      web_url: "https://gitlab.example.com/group/service/-/merge_requests/7",
+      labels: [],
+      sha: "aaa",
+      state: "opened",
+      draft: false
+    } as any);
+    await state.upsertMergeRequestShared(shared.id, project.id, {
+      iid: 7,
+      title: "Updated title",
+      web_url: "https://gitlab.example.com/group/service/-/merge_requests/7",
+      labels: ["review"],
+      sha: "bbb",
+      state: "opened",
+      draft: false
+    } as any);
+
+    await state.setSharedBranchWatchState(shared.id, project.id, "main", "aaa");
+    const branch = await state.setSharedBranchWatchState(shared.id, project.id, "main", "bbb");
+
+    const mrs = await state.listMergeRequestViews(userId);
+    expect(mrs).toHaveLength(1);
+    expect(mrs[0]?.title).toBe("Updated title");
+    expect(mrs[0]?.headSha).toBe("bbb");
+    expect(branch.lastSeenSha).toBe("bbb");
+    await db.$disconnect();
+  });
+
   it("exposes webhook status from the shared GitLab project", async () => {
     const db = await testDb();
     const state = new ReviewStateStore(db);
@@ -146,6 +237,40 @@ describe("multi-user review state", () => {
 
     expect(projects[0]?.webhookStatus).toBe("connected");
     expect(projects[0]?.webhookUrl).toBe("https://reviewer.example.com/api/gitlab/webhook");
+    await db.$disconnect();
+  });
+
+  it("counts remaining subscriptions for a shared GitLab project", async () => {
+    const db = await testDb();
+    const state = new ReviewStateStore(db);
+    const userA = await insertTestUser(db, { gitlabUserId: 1, username: "alice" });
+    const userB = await insertTestUser(db, { gitlabUserId: 2, username: "bob" });
+    const shared = await state.upsertGitlabProject({
+      gitlabHost: "https://gitlab.example.com",
+      gitlabProjectId: "123",
+      pathWithNamespace: "group/service",
+      nameWithNamespace: "Group / Service"
+    });
+    const projectA = await state.createProject(userA, {
+      gitlabProjectRefId: shared.id,
+      gitlabProjectId: "123",
+      displayName: "Alice service",
+      enabled: true,
+      skipLabels: []
+    });
+    const projectB = await state.createProject(userB, {
+      gitlabProjectRefId: shared.id,
+      gitlabProjectId: "123",
+      displayName: "Bob service",
+      enabled: true,
+      skipLabels: []
+    });
+
+    expect(await state.countProjectSubscriptions(shared.id)).toBe(2);
+    await state.deleteProject(userA, projectA.id);
+    expect(await state.countProjectSubscriptions(shared.id)).toBe(1);
+    await state.deleteProject(userB, projectB.id);
+    expect(await state.countProjectSubscriptions(shared.id)).toBe(0);
     await db.$disconnect();
   });
 
@@ -185,12 +310,60 @@ describe("multi-user review state", () => {
     const updatedByB = await state.updateGitlabProjectReviewStrategy(userB, projectB.id, "fast");
     expect(updatedByB.reviewStrategy).toBe("fast");
     expect(updatedByB.reviewStrategyUpdatedByUserId).toBe(userB);
-    await expect(state.updateGitlabProjectReviewStrategy(outsider, projectA.id, "balanced")).rejects.toThrow();
+    const updatedByOutsider = await state.updateGitlabProjectReviewStrategy(outsider, projectA.id, "balanced");
+    expect(updatedByOutsider.reviewStrategy).toBe("balanced");
 
     await db.$disconnect();
   });
 
-  it("keeps merge request and review views scoped by user", async () => {
+  it("stores shared project review config for subscribed users only", async () => {
+    const db = await testDb();
+    const state = new ReviewStateStore(db);
+    const userA = await insertTestUser(db, { gitlabUserId: 1, username: "alice" });
+    const userB = await insertTestUser(db, { gitlabUserId: 2, username: "bob" });
+    const outsider = await insertTestUser(db, { gitlabUserId: 3, username: "mallory" });
+    const shared = await state.upsertGitlabProject({
+      gitlabHost: "https://gitlab.example.com",
+      gitlabProjectId: "123",
+      pathWithNamespace: "group/service",
+      nameWithNamespace: "Group / Service"
+    });
+    const projectA = await state.createProject(userA, {
+      gitlabProjectRefId: shared.id,
+      gitlabProjectId: "123",
+      displayName: "Alice service",
+      enabled: true,
+      skipLabels: []
+    });
+    const projectB = await state.createProject(userB, {
+      gitlabProjectRefId: shared.id,
+      gitlabProjectId: "123",
+      displayName: "Bob service",
+      enabled: true,
+      skipLabels: []
+    });
+
+    const updated = await state.updateProjectReviewConfig(userA, projectA.id, {
+      reviewProfile: "chill",
+      pathFilters: ["src/**", "!src/generated/**"],
+      instructions: [
+        {
+          pathGlob: "src/grpc/**",
+          instructions: "stream lifecycle과 context cancel을 확인하세요.",
+          enabled: true
+        }
+      ]
+    });
+
+    expect(updated.reviewProfile).toBe("chill");
+    expect(updated.pathFilters).toEqual(["src/**", "!src/generated/**"]);
+    expect(updated.instructions).toHaveLength(1);
+    expect((await state.getProjectReviewConfig(userB, projectB.id)).reviewProfile).toBe("chill");
+    expect((await state.getProjectReviewConfig(outsider, projectA.id)).reviewProfile).toBe("chill");
+    await db.$disconnect();
+  });
+
+  it("shows merge request and review views to every logged-in user", async () => {
     const db = await testDb();
     const state = new ReviewStateStore(db);
     const userA = await insertTestUser(db, { gitlabUserId: 1, username: "alice" });
@@ -220,11 +393,11 @@ describe("multi-user review state", () => {
     });
 
     expect(await state.listMergeRequestViews(userA)).toHaveLength(1);
-    expect(await state.listMergeRequestViews(userB)).toHaveLength(0);
+    expect(await state.listMergeRequestViews(userB)).toHaveLength(1);
     await db.$disconnect();
   });
 
-  it("keeps branch watch states and commit review runs scoped by user", async () => {
+  it("keeps branch watch states per project but shows commit review runs to every logged-in user", async () => {
     const db = await testDb();
     const state = new ReviewStateStore(db);
     const userA = await insertTestUser(db, { gitlabUserId: 1, username: "alice" });
@@ -261,7 +434,7 @@ describe("multi-user review state", () => {
     expect(await state.hasCompletedCommitRun(userA, projectA.gitlabProjectId, "abc123")).toBe(true);
     expect(await state.hasCompletedCommitRun(userB, projectB.gitlabProjectId, "abc123")).toBe(false);
     expect(await state.listCommitReviewRuns(userA)).toHaveLength(1);
-    expect(await state.listCommitReviewRuns(userB)).toHaveLength(0);
+    expect(await state.listCommitReviewRuns(userB)).toHaveLength(1);
     await db.$disconnect();
   });
 
@@ -285,6 +458,214 @@ describe("multi-user review state", () => {
     expect(runs[0]?.projectName).toBe("group/manual-only");
     expect(runs[0]?.status).toBe("failed");
     expect(runs[0]?.reviewMeta).toBeNull();
+    await db.$disconnect();
+  });
+
+  it("stores manual commit review strategy override", async () => {
+    const db = await testDb();
+    const state = new ReviewStateStore(db);
+    const userId = await insertTestUser(db, { gitlabUserId: 1, username: "alice" });
+    const shared = await state.upsertGitlabProject({
+      gitlabHost: "https://gitlab.example.com",
+      gitlabProjectId: "123",
+      pathWithNamespace: "group/service",
+      nameWithNamespace: "Group / Service"
+    });
+
+    const runId = await state.startSharedCommitRun(
+      userId,
+      null,
+      shared.id,
+      shared.gitlabProjectId,
+      "main",
+      { id: "strategy123", title: "Manual strategy test" },
+      "manual",
+      "queued",
+      "thorough"
+    );
+
+    const run = await state.getCommitRunById(userId, runId);
+    expect(run?.reviewStrategyOverride).toBe("thorough");
+    await db.$disconnect();
+  });
+
+  it("uses shared GitLab project name for commit review rows", async () => {
+    const db = await testDb();
+    const state = new ReviewStateStore(db);
+    const userId = await insertTestUser(db, { gitlabUserId: 1, username: "alice" });
+    const shared = await state.upsertGitlabProject({
+      gitlabHost: "https://gitlab.example.com",
+      gitlabProjectId: "469",
+      pathWithNamespace: "renew/lime/collector",
+      nameWithNamespace: "RENEW / LIME / Collector"
+    });
+
+    await state.startSharedCommitRun(
+      userId,
+      null,
+      shared.id,
+      shared.gitlabProjectId,
+      "main",
+      { id: "name123", title: "Name test" },
+      "manual",
+      "queued"
+    );
+
+    const runs = await state.listCommitReviewRuns(userId);
+    expect(runs[0]?.projectName).toBe("RENEW / LIME / Collector");
+    await db.$disconnect();
+  });
+
+  it("stores structured review output and team-visible feedback", async () => {
+    const db = await testDb();
+    const state = new ReviewStateStore(db);
+    const userId = await insertTestUser(db, { gitlabUserId: 1, username: "alice" });
+    const otherUserId = await insertTestUser(db, { gitlabUserId: 2, username: "bob" });
+    const runId = await state.startCommitRun(userId, null, "group/manual-only", "main", { id: "feedback123", title: "Feedback test" }, "manual");
+    await state.finishCommitCommented(
+      runId,
+      { id: 1, url: "https://gitlab.example.com/comment/1" },
+      "markdown",
+      {
+        reviewLanguage: "ko-KR",
+        assessment: "needs_revision",
+        changeIntent: "수동 커밋 리뷰의 구조화 결과 저장을 검증하는 변경입니다.",
+        reviewEffort: { score: 3, reason: "중간 범위 변경입니다." },
+        changedFilesSummary: [],
+        riskAreas: [],
+        summary: [],
+        criticalIssues: [],
+        potentialIssues: [
+          {
+            severity: "medium",
+            confidence: 0.8,
+            category: "bug",
+            title: "경계값 오류",
+            file: "src/app.ts",
+            line: 10,
+            details: "경계값에서 실패합니다.",
+            impact: "요청이 실패할 수 있습니다.",
+            recommendation: "경계값 처리를 추가하세요."
+          }
+        ],
+        suggestions: [],
+        testSuggestions: [],
+        notes: [],
+        flowSummary: [],
+        toolFindingsUsed: [],
+        confidenceReason: "근거가 충분합니다.",
+        shouldPostComment: true,
+        commentReason: "조치가 필요합니다."
+      }
+    );
+
+    expect((await state.getCommitRunById(userId, runId))?.structuredReview?.potentialIssues[0]?.title).toBe("경계값 오류");
+    await state.addReviewFeedback(userId, "commit", runId, {
+      issueFingerprint: "src/app.ts:10:경계값 오류",
+      rating: "helpful"
+    });
+    await state.addReviewFeedback(otherUserId, "commit", runId, {
+      issueFingerprint: "src/app.ts:10:경계값 오류",
+      rating: "false_positive"
+    });
+    expect((await state.reviewQualityStats(userId)).feedbackCount).toBe(2);
+    expect((await state.reviewQualityStats(otherUserId)).falsePositiveCount).toBe(1);
+    await db.$disconnect();
+  });
+
+  it("cancels queued commit review runs and prevents job claim", async () => {
+    const db = await testDb();
+    const state = new ReviewStateStore(db);
+    const userId = await insertTestUser(db, { gitlabUserId: 1, username: "alice" });
+    const runId = await state.startCommitRun(userId, null, "group/manual-only", "main", { id: "cancel123", title: "Cancel me" }, "manual", "queued");
+    const job = await state.createReviewJob({ kind: "commit_manual", userId, runType: "commit", runId, payload: { commitSha: "cancel123" } });
+
+    const canceled = await state.cancelCommitRun(userId, runId);
+
+    expect(canceled.status).toBe("canceled");
+    expect(await state.isReviewJobCanceled(job.id)).toBe(true);
+    expect(await state.claimNextReviewJob()).toBeNull();
+    await db.$disconnect();
+  });
+
+  it("releases shared project and commit locks when canceling a retry job with run-only payload", async () => {
+    const db = await testDb();
+    const state = new ReviewStateStore(db);
+    const userId = await insertTestUser(db, { gitlabUserId: 1, username: "alice" });
+    const shared = await state.upsertGitlabProject({
+      gitlabHost: "https://gitlab.example.com",
+      gitlabProjectId: "123",
+      pathWithNamespace: "group/service",
+      nameWithNamespace: "Group / Service"
+    });
+    const runId = await state.startSharedCommitRun(
+      userId,
+      null,
+      shared.id,
+      shared.gitlabProjectId,
+      "main",
+      { id: "retry-lock-sha", title: "Retry lock" },
+      "manual",
+      "queued"
+    );
+    await state.createReviewJob({ kind: "commit_retry", userId, runType: "commit", runId, payload: { runId } });
+    expect(await state.acquireLock(`project:${shared.gitlabHost}:${shared.gitlabProjectId}`)).toBe(true);
+    expect(await state.acquireLock(`commit:${shared.id}:retry-lock-sha`)).toBe(true);
+
+    await state.cancelCommitRun(userId, runId);
+
+    expect(await state.acquireLock(`project:${shared.gitlabHost}:${shared.gitlabProjectId}`)).toBe(true);
+    expect(await state.acquireLock(`commit:${shared.id}:retry-lock-sha`)).toBe(true);
+    await db.$disconnect();
+  });
+
+  it("cancels queued MR review runs and related jobs", async () => {
+    const db = await testDb();
+    const state = new ReviewStateStore(db);
+    const userId = await insertTestUser(db, { gitlabUserId: 1, username: "alice" });
+    const project = await state.createProject(userId, {
+      gitlabProjectId: "group/service",
+      displayName: "Service",
+      enabled: true,
+      skipLabels: []
+    });
+    const runId = await state.startRun(project.id, 7, "head123", "queued");
+    const job = await state.createReviewJob({ kind: "mr_retry", userId, runType: "mr", runId, payload: { runId } });
+
+    const canceled = await state.cancelRun(userId, runId);
+
+    expect(canceled.status).toBe("canceled");
+    expect(await state.isReviewJobCanceled(job.id)).toBe(true);
+    expect(await state.claimNextReviewJob()).toBeNull();
+    await db.$disconnect();
+  });
+
+  it("releases shared project and MR locks when canceling a retry job with run-only payload", async () => {
+    const db = await testDb();
+    const state = new ReviewStateStore(db);
+    const userId = await insertTestUser(db, { gitlabUserId: 1, username: "alice" });
+    const shared = await state.upsertGitlabProject({
+      gitlabHost: "https://gitlab.example.com",
+      gitlabProjectId: "123",
+      pathWithNamespace: "group/service",
+      nameWithNamespace: "Group / Service"
+    });
+    const project = await state.createProject(userId, {
+      gitlabProjectRefId: shared.id,
+      gitlabProjectId: shared.gitlabProjectId,
+      displayName: "Service",
+      enabled: true,
+      skipLabels: []
+    });
+    const runId = await state.startSharedRun(shared.id, project.id, 7, "head-sha", "queued");
+    await state.createReviewJob({ kind: "mr_retry", userId, runType: "mr", runId, payload: { runId } });
+    expect(await state.acquireLock(`project:${shared.gitlabHost}:${shared.gitlabProjectId}`)).toBe(true);
+    expect(await state.acquireLock(`mr:${shared.id}:7:head-sha`)).toBe(true);
+
+    await state.cancelRun(userId, runId);
+
+    expect(await state.acquireLock(`project:${shared.gitlabHost}:${shared.gitlabProjectId}`)).toBe(true);
+    expect(await state.acquireLock(`mr:${shared.id}:7:head-sha`)).toBe(true);
     await db.$disconnect();
   });
 
@@ -391,7 +772,7 @@ describe("multi-user review state", () => {
     await db.$disconnect();
   });
 
-  it("stores review events with user-scoped access and sanitized metadata", async () => {
+  it("stores review events with team-wide access and sanitized metadata", async () => {
     const db = await testDb();
     const state = new ReviewStateStore(db);
     const userA = await insertTestUser(db, { gitlabUserId: 1, username: "alice" });
@@ -424,7 +805,7 @@ describe("multi-user review state", () => {
     expect(events[0]?.metadata.token).toBeUndefined();
     expect(events[0]?.metadata.rawPrompt).toBeUndefined();
     expect(events[0]?.metadata.diffText).toBeUndefined();
-    await expect(state.listReviewEvents(userB, "mr", runId)).rejects.toThrow("Review run not found");
+    expect(await state.listReviewEvents(userB, "mr", runId)).toHaveLength(1);
     await db.$disconnect();
   });
 

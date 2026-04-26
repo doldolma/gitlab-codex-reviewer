@@ -2,18 +2,19 @@
 
 import { type FormEvent, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ExternalLink, Play, RefreshCw, RotateCcw } from "lucide-react";
+import { ExternalLink, Play, RefreshCw, RotateCcw, XCircle } from "lucide-react";
 import { AppShell } from "../../components/app-shell";
 import { CommitReviewDrawer } from "../../components/commit-review-drawer";
 import { BranchCombobox, CommitCombobox, GitLabProjectCombobox } from "../../components/gitlab-combobox";
 import { ReviewMetaSummary } from "../../components/review-meta-summary";
-import { apiGet, apiSend, type CommitReview, type ReviewJob } from "../../lib/api-client";
+import { apiGet, apiSend, type CommitReview, type ReviewJob, type ReviewStrategy } from "../../lib/api-client";
 
 export default function CommitReviewsPage() {
   const queryClient = useQueryClient();
   const [gitlabProjectId, setGitlabProjectId] = useState("");
   const [commitSha, setCommitSha] = useState("");
   const [branchName, setBranchName] = useState("");
+  const [reviewStrategy, setReviewStrategy] = useState<ReviewStrategy>("auto");
   const [selected, setSelected] = useState<CommitReview | null>(null);
 
   const commitReviews = useQuery({
@@ -26,7 +27,7 @@ export default function CommitReviewsPage() {
   const activeCount = reviews.filter((review) => isActiveStatus(review.status)).length;
 
   const manualReview = useMutation({
-    mutationFn: (payload: { gitlabProjectId: string; commitSha: string; branchName?: string }) =>
+    mutationFn: (payload: { gitlabProjectId: string; commitSha: string; branchName?: string; reviewStrategy: ReviewStrategy }) =>
       apiSend<{ commitReview: CommitReview; job: ReviewJob }>("/api/commit-reviews/review", { method: "POST", body: JSON.stringify(payload) }),
     onSuccess: (result) => {
       setCommitSha("");
@@ -47,13 +48,23 @@ export default function CommitReviewsPage() {
     }
   });
 
+  const cancel = useMutation({
+    mutationFn: (runId: number) => apiSend<{ commitReview: CommitReview }>(`/api/commit-reviews/${runId}/cancel`, { method: "POST" }),
+    onSuccess: (result) => {
+      setSelected(result.commitReview);
+      void queryClient.invalidateQueries({ queryKey: ["commit-reviews"] });
+      void queryClient.invalidateQueries({ queryKey: ["review-events"] });
+    }
+  });
+
   function submit(event: FormEvent) {
     event.preventDefault();
     if (!gitlabProjectId.trim() || !branchName.trim() || !commitSha.trim()) return;
     manualReview.mutate({
       gitlabProjectId,
       commitSha,
-      branchName: branchName || undefined
+      branchName: branchName || undefined,
+      reviewStrategy
     });
   }
 
@@ -104,13 +115,22 @@ export default function CommitReviewsPage() {
               <span>커밋</span>
               <CommitCombobox projectId={gitlabProjectId} branchName={branchName} value={commitSha} onChange={setCommitSha} />
             </label>
+            <label>
+              <span>리뷰 전략</span>
+              <select value={reviewStrategy} onChange={(event) => setReviewStrategy(event.target.value as ReviewStrategy)}>
+                <option value="auto">Auto</option>
+                <option value="fast">빠름</option>
+                <option value="balanced">균형</option>
+                <option value="thorough">정밀</option>
+              </select>
+            </label>
             <button
               className="button form-submit"
               type="submit"
               disabled={manualReview.isPending || !gitlabProjectId.trim() || !branchName.trim() || !commitSha.trim()}
             >
               <Play size={16} />
-              리뷰 큐에 넣기
+              리뷰 시작
             </button>
           </form>
           {manualReview.isError && (
@@ -182,6 +202,11 @@ export default function CommitReviewsPage() {
                             <RotateCcw size={16} />
                           </button>
                         )}
+                        {isActiveStatus(review.status) && (
+                          <button className="icon-button" onClick={() => cancel.mutate(review.id)} disabled={cancel.isPending} title="리뷰 취소">
+                            <XCircle size={16} />
+                          </button>
+                        )}
                       </div>
                     </td>
                   </tr>
@@ -197,7 +222,12 @@ export default function CommitReviewsPage() {
             </table>
           </div>
         </section>
-        <CommitReviewDrawer review={selectedReview} onClose={() => setSelected(null)} />
+        <CommitReviewDrawer
+          review={selectedReview}
+          onClose={() => setSelected(null)}
+          onCancel={(runId) => cancel.mutate(runId)}
+          isCanceling={cancel.isPending}
+        />
       </div>
     </AppShell>
   );
@@ -215,6 +245,8 @@ function labelForStatus(status: string): string {
       return "완료: 이슈 없음";
     case "failed":
       return "실패";
+    case "canceled":
+      return "취소됨";
     default:
       return "대기";
   }
@@ -237,6 +269,8 @@ function statusClass(status: string): string {
       return "muted";
     case "failed":
       return "bad";
+    case "canceled":
+      return "muted";
     default:
       return "muted";
   }

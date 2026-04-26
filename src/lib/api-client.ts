@@ -1,6 +1,8 @@
 export type UserRole = "admin" | "user";
 export type CodexReviewReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh";
 export type ReviewStrategy = "auto" | "fast" | "balanced" | "thorough";
+export type ReviewProfile = "chill" | "assertive";
+export type ReviewFeedbackRating = "helpful" | "false_positive" | "too_minor" | "missed_issue";
 
 export type AuthStatus = {
   authenticated: boolean;
@@ -71,10 +73,49 @@ export type Project = {
   reviewStrategy: ReviewStrategy;
   reviewStrategyUpdatedByUserId: number | null;
   reviewStrategyUpdatedAt: string | null;
+  reviewProfile: ReviewProfile;
+  pathFilters: string[];
   webhookStatus: "connected" | "error" | "missing";
   webhookUrl: string | null;
   webhookLastVerifiedAt: string | null;
   webhookError: string | null;
+};
+
+export type ProjectReviewConfig = {
+  reviewProfile: ReviewProfile;
+  pathFilters: string[];
+  instructions: { id: number; pathGlob: string; instructions: string; enabled: boolean }[];
+};
+
+export type StructuredReviewIssue = {
+  severity: "critical" | "high" | "medium" | "low";
+  confidence: number;
+  category: string;
+  title: string;
+  file: string | null;
+  line: number | null;
+  details: string;
+  impact: string;
+  recommendation: string;
+};
+
+export type StructuredReview = {
+  reviewLanguage: "ko-KR";
+  assessment: string;
+  reviewEffort: { score: number; reason: string };
+  changedFilesSummary: { path: string; summary: string; riskLevel: string }[];
+  riskAreas: string[];
+  summary: string[];
+  criticalIssues: StructuredReviewIssue[];
+  potentialIssues: StructuredReviewIssue[];
+  suggestions: string[];
+  testSuggestions: string[];
+  notes: string[];
+  flowSummary: { step: string; actor: string; action: string; caution: string | null }[];
+  toolFindingsUsed: string[];
+  confidenceReason: string;
+  shouldPostComment: boolean;
+  commentReason: string;
 };
 
 export type ReviewMeta = {
@@ -110,6 +151,7 @@ export type MergeRequest = {
   reviewedAt: string | null;
   commentUrl: string | null;
   findingsMarkdown: string | null;
+  structuredReview: StructuredReview | null;
   errorMessage: string | null;
   reviewMeta: ReviewMeta | null;
 };
@@ -128,12 +170,14 @@ export type CommitReview = {
   authorName: string | null;
   committedDate: string | null;
   trigger: "auto" | "manual" | string;
+  reviewStrategyOverride: ReviewStrategy | null;
   status: string;
   startedAt: string;
   finishedAt: string | null;
   commentId: number | null;
   commentUrl: string | null;
   findingsMarkdown: string | null;
+  structuredReview: StructuredReview | null;
   errorMessage: string | null;
   reviewMeta: ReviewMeta | null;
 };
@@ -152,7 +196,7 @@ export type ReviewEvent = {
 export type ReviewJob = {
   id: number;
   kind: "commit_manual" | "commit_retry" | "mr_retry" | "scan_user" | "commit_webhook" | "mr_webhook" | string;
-  status: "queued" | "running" | "completed" | "failed" | string;
+  status: "queued" | "running" | "completed" | "failed" | "canceled" | string;
   userId: number;
   runType: "mr" | "commit" | null;
   runId: number | null;
@@ -197,6 +241,10 @@ export type Dashboard = {
     runningCount: number;
     failedCount: number;
     commentedCount: number;
+    feedbackCount: number;
+    falsePositiveCount: number;
+    canceledOrFailedCount: number;
+    averageReviewSeconds: number | null;
   };
   gitlab: AuthStatus["gitlab"];
   currentUser: AuthStatus["currentUser"];

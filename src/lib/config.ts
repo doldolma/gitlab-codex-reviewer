@@ -10,6 +10,7 @@ loadDotenv({ path: envFilePath });
 const DEFAULT_DATABASE_URL = "file:../.data/gitlab-codex-reviewer.sqlite";
 const DEFAULT_REVIEW_CONCURRENCY = 3;
 const DEFAULT_POLL_INTERVAL_SECONDS = 300;
+export type CodexSandboxMode = "read-only" | "danger-full-access";
 
 const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
@@ -56,6 +57,7 @@ export function loadConfig() {
     databaseUrl,
     codexHome,
     codexBin: resolveCodexBin(appRoot),
+    codexSandboxMode: resolveCodexSandboxMode(),
     workspaceRoot,
     pollIntervalSeconds: DEFAULT_POLL_INTERVAL_SECONDS,
     reviewConcurrency: DEFAULT_REVIEW_CONCURRENCY,
@@ -79,6 +81,20 @@ export function resolveCodexBin(appRoot = process.cwd()): string {
   const localBin = resolve(appRoot, "node_modules", ".bin", process.platform === "win32" ? "codex.cmd" : "codex");
   if (existsSync(localBin)) return localBin;
   return "codex";
+}
+
+export function resolveCodexSandboxMode(): CodexSandboxMode {
+  return isContainerRuntime() ? "danger-full-access" : "read-only";
+}
+
+function isContainerRuntime(): boolean {
+  if (existsSync("/.dockerenv")) return true;
+  try {
+    const cgroup = readFileSync("/proc/1/cgroup", "utf8");
+    return /docker|containerd|kubepods|podman/i.test(cgroup);
+  } catch {
+    return false;
+  }
 }
 
 function normalizeDatabaseUrl(databaseUrl: string, appRoot = process.cwd()): string {

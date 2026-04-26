@@ -22,6 +22,7 @@ export function testConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     databaseUrl: `file:${databasePath}`,
     codexHome: "/tmp/gitlab-codex-reviewer-test-codex",
     codexBin: "codex",
+    codexSandboxMode: "read-only",
     workspaceRoot: "/tmp/gitlab-codex-reviewer-test-workspaces",
     pollIntervalSeconds: 300,
     reviewConcurrency: 3,

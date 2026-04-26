@@ -23,6 +23,7 @@ model User {
   sessions         Session[]
   commitReviewRuns CommitReviewRun[]
   reviewJobs       ReviewJob[]
+  reviewFeedback   ReviewFeedback[]
 
   @@unique([gitlabHost, gitlabUserId])
   @@index([gitlabHost, gitlabUserId], map: "idx_users_gitlab_identity")
@@ -109,6 +110,8 @@ model GitlabProject {
   reviewStrategy         String  @default("auto") @map("review_strategy")
   reviewStrategyUpdatedByUserId Int? @map("review_strategy_updated_by_user_id")
   reviewStrategyUpdatedAt String? @map("review_strategy_updated_at")
+  reviewProfile          String  @default("assertive") @map("review_profile")
+  pathFiltersJson        String  @default("[]") @map("path_filters_json")
   createdAt              String  @map("created_at")
   updatedAt              String  @map("updated_at")
 
@@ -117,10 +120,26 @@ model GitlabProject {
   reviewRuns        ReviewRun[]
   branchWatchStates BranchWatchState[]
   commitReviewRuns  CommitReviewRun[]
+  reviewInstructions ProjectReviewInstruction[]
 
   @@unique([gitlabHost, gitlabProjectId])
   @@index([gitlabHost], map: "idx_gitlab_projects_host")
   @@map("gitlab_projects")
+}
+
+model ProjectReviewInstruction {
+  id                 Int     @id @default(autoincrement())
+  gitlabProjectRefId Int     @map("gitlab_project_ref_id")
+  pathGlob           String  @map("path_glob")
+  instructions       String
+  enabled            Boolean @default(true)
+  createdAt          String  @map("created_at")
+  updatedAt          String  @map("updated_at")
+
+  gitlabProject GitlabProject @relation(fields: [gitlabProjectRefId], references: [id], onDelete: Cascade)
+
+  @@index([gitlabProjectRefId], map: "idx_project_review_instructions_project")
+  @@map("project_review_instructions")
 }
 
 model Project {
@@ -206,6 +225,7 @@ model ReviewRun {
   commentId          Int?    @map("comment_id")
   commentUrl         String? @map("comment_url")
   findingsMarkdown   String? @map("findings_markdown")
+  structuredReviewJson String? @map("structured_review_json")
   errorMessage       String? @map("error_message")
 
   project       Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
@@ -231,12 +251,14 @@ model CommitReviewRun {
   authorName         String? @map("author_name")
   committedDate      String? @map("committed_date")
   trigger            String
+  reviewStrategyOverride String? @map("review_strategy_override")
   status             String
   startedAt          String  @map("started_at")
   finishedAt         String? @map("finished_at")
   commentId          Int?    @map("comment_id")
   commentUrl         String? @map("comment_url")
   findingsMarkdown   String? @map("findings_markdown")
+  structuredReviewJson String? @map("structured_review_json")
   errorMessage       String? @map("error_message")
 
   user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -295,4 +317,21 @@ model ReviewLock {
   expiresAt  String? @map("expires_at")
 
   @@map("review_locks")
+}
+
+model ReviewFeedback {
+  id               Int     @id @default(autoincrement())
+  userId           Int     @map("user_id")
+  runType          String  @map("run_type")
+  runId            Int     @map("run_id")
+  issueFingerprint String  @map("issue_fingerprint")
+  rating           String
+  note             String?
+  createdAt        String  @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, runType, runId, issueFingerprint], map: "uniq_review_feedback_user_issue")
+  @@index([runType, runId], map: "idx_review_feedback_run")
+  @@map("review_feedback")
 }

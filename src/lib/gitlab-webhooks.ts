@@ -90,6 +90,46 @@ export class GitLabWebhookService {
     return this.ensureProjectWebhook(project, true);
   }
 
+  async deleteProjectWebhook(gitlabProjectRefId: number): Promise<{ deleted: boolean; error: string | null }> {
+    const project = await this.state.getGitlabProject(gitlabProjectRefId);
+    const hookId = project.webhookHookId;
+    if (!hookId) {
+      await this.state.updateGitlabProjectWebhook(project.id, {
+        webhookHookId: null,
+        webhookSecretEncrypted: null,
+        webhookUrl: null,
+        webhookLastVerifiedAt: null,
+        webhookError: null
+      });
+      return { deleted: false, error: null };
+    }
+
+    try {
+      const botConnection = await this.reviewerBot.getConnection();
+      if (!botConnection) throw new Error("Reviewer bot token is not connected");
+      const client = new GitLabClient(botConnection);
+      await client.deleteProjectHook(project.gitlabProjectId, hookId);
+      await this.state.updateGitlabProjectWebhook(project.id, {
+        webhookHookId: null,
+        webhookSecretEncrypted: null,
+        webhookUrl: null,
+        webhookLastVerifiedAt: null,
+        webhookError: null
+      });
+      return { deleted: true, error: null };
+    } catch (error) {
+      const message = errorMessage(error);
+      await this.state.updateGitlabProjectWebhook(project.id, {
+        webhookHookId: project.webhookHookId,
+        webhookSecretEncrypted: project.webhookSecretEncrypted,
+        webhookUrl: project.webhookUrl,
+        webhookLastVerifiedAt: project.webhookLastVerifiedAt,
+        webhookError: message
+      });
+      return { deleted: false, error: message };
+    }
+  }
+
   async handleWebhook(eventName: string | null, token: string | null, payload: unknown): Promise<WebhookHandleResult> {
     if (!eventName) return { accepted: false, queued: 0, skipped: 1, reason: "Missing X-Gitlab-Event" };
     if (!token) return { accepted: false, queued: 0, skipped: 1, reason: "Missing X-Gitlab-Token" };
@@ -178,7 +218,10 @@ export class GitLabWebhookService {
     const state = payload.object_attributes?.state;
     if (!mrIid || !headSha) return { accepted: true, queued: 0, skipped: 1, reason: "Merge request payload is missing iid or head sha" };
     if (state && state !== "opened") return { accepted: true, queued: 0, skipped: 1, reason: `Merge request is not opened: ${state}` };
-    if (!group.mrTargetsAll && targetBranch && !group.mrTargetBranches.includes(targetBranch)) {
+    if (!group.mrTargetBranches.length) {
+      return { accepted: true, queued: 0, skipped: 1, reason: "MR review is disabled for this project" };
+    }
+    if (!targetBranch || !group.mrTargetBranches.includes(targetBranch)) {
       return { accepted: true, queued: 0, skipped: 1, reason: `Target branch is not configured for MR review: ${targetBranch}` };
     }
 

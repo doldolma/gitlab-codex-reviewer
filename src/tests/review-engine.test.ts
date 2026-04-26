@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { REVIEW_OUTPUT_SCHEMA, buildReviewPrompt, renderReviewMarkdown, shouldTreatAsFindings, type StructuredReview } from "../lib/prompts";
+import { REVIEW_OUTPUT_SCHEMA, buildReviewPrompt, parseStructuredReview, renderReviewMarkdown, shouldTreatAsFindings, type StructuredReview } from "../lib/prompts";
 import { CodexReviewEngine, type ReviewEngineEvent } from "../lib/review-engine";
 import { CodexReviewTriageEngine, TRIAGE_OUTPUT_SCHEMA } from "../lib/review-triage";
 
@@ -57,6 +57,7 @@ describe("CodexReviewEngine", () => {
     });
     expect(result.hasFindings).toBe(false);
     expect(result.markdown).toContain("### :mag: 리뷰 요약");
+    expect(result.markdown).toContain("| 변경 목적 | 서비스 처리 흐름을 안전하게 조정하는 변경입니다. |");
     expect(result.markdown).toContain("| 전체 평가 | 안전 |");
     expect(result.markdown).toContain("| 조치 필요 | 없음 |");
   });
@@ -119,6 +120,48 @@ describe("CodexReviewEngine", () => {
     );
   });
 
+  it("passes abort signal to streamed review turns", async () => {
+    codexMocks.runStreamed.mockResolvedValue({ events: eventsForReview(noFindingsReview()) });
+    const controller = new AbortController();
+
+    await new CodexReviewEngine().review(
+      {
+        kind: "commit",
+        repoName: "group/service",
+        sha: "abc123",
+        diffText: "diff text"
+      },
+      undefined,
+      undefined,
+      { signal: controller.signal }
+    );
+
+    expect(codexMocks.runStreamed).toHaveBeenCalledWith(expect.any(String), {
+      outputSchema: REVIEW_OUTPUT_SCHEMA,
+      signal: controller.signal
+    });
+  });
+
+  it("can run Codex without the bwrap sandbox for container deployments", async () => {
+    codexMocks.runStreamed.mockResolvedValue({ events: eventsForReview(noFindingsReview()) });
+
+    await new CodexReviewEngine({ sandboxMode: "danger-full-access" }).review({
+      kind: "commit",
+      repoName: "group/service",
+      sha: "abc123",
+      diffText: "diff text",
+      workingDirectory: "/workspaces/service"
+    });
+
+    expect(codexMocks.startThread).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sandboxMode: "danger-full-access",
+        approvalPolicy: "never",
+        skipGitRepoCheck: true
+      })
+    );
+  });
+
   it("builds a Korean workspace review prompt with repository exploration guardrails", () => {
     const prompt = buildReviewPrompt({
       kind: "merge_request",
@@ -128,10 +171,33 @@ describe("CodexReviewEngine", () => {
       sha: "abc123",
       branchName: "main",
       diffText: "diff --git a/src/app.ts b/src/app.ts",
-      workingDirectory: "/workspaces/service"
+      workingDirectory: "/workspaces/service",
+      changedFiles: ["src/app.ts"],
+      pathFilters: ["src/**"],
+      matchedInstructions: [
+        {
+          pathGlob: "src/**",
+          matchedFiles: ["src/app.ts"],
+          instructions: "인증과 입력 검증을 중점적으로 확인합니다."
+        }
+      ],
+      toolFindings: [
+        {
+          tool: "rg-risk-scan",
+          severity: "medium",
+          title: "위험 패턴 후보",
+          file: "src/app.ts",
+          line: 10,
+          summary: "TODO security"
+        }
+      ],
+      reviewProfile: "assertive"
     });
 
     expect(prompt).toContain("review language is fixed to Korean (ko-KR)");
+    expect(prompt).toContain("change intent and impact context");
+    expect(prompt).toContain("changeIntent");
+    expect(prompt).toContain("It is not a file list");
     expect(prompt).toContain("AGENTS.md");
     expect(prompt).toContain(".coderabbit.yaml/.coderabbit.yml");
     expect(prompt).toContain("rg");
@@ -139,6 +205,10 @@ describe("CodexReviewEngine", () => {
     expect(prompt).toContain("Do not produce Mermaid");
     expect(prompt).toContain("flowSummary");
     expect(prompt).toContain("shouldPostComment is false when there are no actionable findings");
+    expect(prompt).toContain("App Path Instructions");
+    expect(prompt).toContain("인증과 입력 검증");
+    expect(prompt).toContain("Tool Findings");
+    expect(prompt).toContain("Review profile: assertive");
   });
 
   it("treats only critical or potential issues as postable findings", () => {
@@ -167,6 +237,7 @@ describe("CodexReviewEngine", () => {
   it("renders compact GitLab-safe tables without Mermaid blocks", () => {
     const markdown = renderReviewMarkdown({
       ...noFindingsReview(),
+      changeIntent: "UI 렌더링 비용을 줄이는 변경 | 입니다.\n목록 갱신 범위를 좁힙니다.",
       summary: ["파이프 문자를 포함한 요약 | 도 안전하게 표시됩니다."],
       changedFilesSummary: [
         {
@@ -186,11 +257,25 @@ describe("CodexReviewEngine", () => {
     });
 
     expect(markdown).toContain("### :file_folder: 변경 파일");
+    expect(markdown).toContain("| 변경 목적 | UI 렌더링 비용을 줄이는 변경 \\| 입니다.<br>목록 갱신 범위를 좁힙니다. |");
     expect(markdown).toContain("파이프 문자를 포함한 요약 \\| 도 안전하게 표시됩니다.");
     expect(markdown).toContain("src/service\\|core.ts");
     expect(markdown).toContain("여러 줄<br>요약을 표 안에서 표시합니다.");
     expect(markdown).toContain("### :twisted_rightwards_arrows: 흐름 요약");
     expect(markdown).not.toContain("```mermaid");
+  });
+
+  it("requires changeIntent in the structured output schema but keeps legacy parser fallback", () => {
+    expect(REVIEW_OUTPUT_SCHEMA.required).toContain("changeIntent");
+
+    const legacy = noFindingsReview();
+    const { changeIntent: _omitted, ...legacyWithoutChangeIntent } = legacy;
+
+    expect(parseStructuredReview(JSON.stringify(legacyWithoutChangeIntent))).toEqual(
+      expect.objectContaining({
+        changeIntent: legacy.summary[0]
+      })
+    );
   });
 
   it("emits rich tool, message, and usage events from the Codex stream", async () => {
@@ -297,12 +382,47 @@ describe("CodexReviewEngine", () => {
       riskSignals: ["동시성", "webhook"]
     });
   });
+
+  it("passes abort signal to streamed triage turns", async () => {
+    codexMocks.runStreamed.mockResolvedValue({
+      events: eventsForRawResponse(
+        JSON.stringify({
+          recommendedReasoningEffort: "high",
+          riskLevel: "medium",
+          reason: "변경 범위가 보통입니다.",
+          riskSignals: []
+        })
+      )
+    });
+    const controller = new AbortController();
+
+    await new CodexReviewTriageEngine().triage(
+      {
+        kind: "commit",
+        repoName: "group/service",
+        sha: "abc123",
+        diffText: "diff text",
+        changedFiles: ["src/index.ts"],
+        diffBytes: 128,
+        diffTruncated: false,
+        omittedFiles: 0
+      },
+      { model: "gpt-5.5" },
+      { signal: controller.signal }
+    );
+
+    expect(codexMocks.runStreamed).toHaveBeenCalledWith(expect.any(String), {
+      outputSchema: TRIAGE_OUTPUT_SCHEMA,
+      signal: controller.signal
+    });
+  });
 });
 
 function noFindingsReview(): StructuredReview {
   return {
     reviewLanguage: "ko-KR",
     assessment: "safe",
+    changeIntent: "서비스 처리 흐름을 안전하게 조정하는 변경입니다.",
     reviewEffort: {
       score: 2,
       reason: "변경 범위가 작고 영향 파일이 적습니다."
@@ -322,6 +442,8 @@ function noFindingsReview(): StructuredReview {
     testSuggestions: ["기존 회귀 테스트가 계속 통과하는지 확인하세요."],
     notes: [],
     flowSummary: [],
+    toolFindingsUsed: [],
+    confidenceReason: "diff와 관련 컨텍스트가 충분히 좁습니다.",
     shouldPostComment: false,
     commentReason: "게시할 actionable finding이 없습니다."
   };

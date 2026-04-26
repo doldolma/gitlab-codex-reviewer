@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { jsonError, readJson } from "../../../../lib/api-helpers";
 import { isAuthFailure, requireSessionUser } from "../../../../lib/session";
-import { reviewState } from "../../../../lib/services";
+import { gitlabWebhooks, reviewState } from "../../../../lib/services";
 
 export const runtime = "nodejs";
 
@@ -45,8 +45,17 @@ export async function DELETE(_request: Request, context: RouteContext) {
 
   try {
     const { id } = await context.params;
+    const project = await reviewState.getProject(user.id, Number(id));
+    const gitlabProjectRefId = project.gitlabProjectRefId;
     await reviewState.deleteProject(user.id, Number(id));
-    return NextResponse.json({ ok: true });
+
+    let webhook: { deleted: boolean; error: string | null; skipped: boolean } = { deleted: false, error: null, skipped: true };
+    if (gitlabProjectRefId && (await reviewState.countProjectSubscriptions(gitlabProjectRefId)) === 0) {
+      const result = await gitlabWebhooks.deleteProjectWebhook(gitlabProjectRefId);
+      webhook = { ...result, skipped: false };
+    }
+
+    return NextResponse.json({ ok: true, webhook });
   } catch (error) {
     return jsonError(error);
   }

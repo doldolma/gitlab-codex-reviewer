@@ -1,14 +1,18 @@
-import { ExternalLink, RotateCcw } from "lucide-react";
+import { ExternalLink, RotateCcw, XCircle } from "lucide-react";
 import type { MergeRequest } from "../lib/api-client";
 import { ReviewMetaSummary } from "./review-meta-summary";
 
 export function MrReviewTable({
   mergeRequests,
   onRetry,
+  onCancel,
+  isCanceling,
   onSelect
 }: {
   mergeRequests: MergeRequest[];
   onRetry: (runId: number) => void;
+  onCancel?: (runId: number) => void;
+  isCanceling?: boolean;
   onSelect: (mr: MergeRequest) => void;
 }) {
   return (
@@ -53,6 +57,11 @@ export function MrReviewTable({
                       <RotateCcw size={16} />
                     </button>
                   )}
+                  {mr.reviewRunId && onCancel && isActiveStatus(mr.reviewStatus) && (
+                    <button className="icon-button" onClick={() => onCancel(mr.reviewRunId!)} disabled={isCanceling} title="리뷰 취소">
+                      <XCircle size={16} />
+                    </button>
+                  )}
                 </div>
               </td>
             </tr>
@@ -82,6 +91,8 @@ function labelForStatus(status: string | null): string {
       return "완료: 이슈 없음";
     case "failed":
       return "실패";
+    case "canceled":
+      return "취소됨";
     default:
       return "대기";
   }
@@ -98,7 +109,13 @@ function statusClass(status: string | null): string {
       return "muted";
     case "failed":
       return "bad";
+    case "canceled":
+      return "muted";
     default:
       return "muted";
   }
+}
+
+function isActiveStatus(status: string | null): boolean {
+  return status === "queued" || status === "running";
 }

@@ -1,8 +1,10 @@
-import type { BranchWatchState, CommitReviewRun, GitlabProject, MergeRequest, Project, ReviewEvent, ReviewJob, ReviewRun } from "@prisma/client";
+import type { BranchWatchState, CommitReviewRun, GitlabProject, MergeRequest, Project, ProjectReviewInstruction as PrismaProjectReviewInstruction, ReviewEvent, ReviewJob, ReviewRun } from "@prisma/client";
 import type { Db } from "./prisma";
 import { nowIso } from "./prisma";
 import type { GitLabCommit, GitLabMergeRequest } from "./gitlab-client";
 import { parseReviewStrategy, type ReviewStrategy } from "./review-strategy";
+import { defaultPathFilters, normalizeInstructions, normalizePathFilters, parseReviewProfile, type ProjectReviewConfig, type ReviewProfile } from "./review-config";
+import type { StructuredReview } from "./prompts";
 
 export type ProjectRow = {
   id: number;
@@ -18,6 +20,8 @@ export type ProjectRow = {
   reviewStrategy: ReviewStrategy;
   reviewStrategyUpdatedByUserId: number | null;
   reviewStrategyUpdatedAt: string | null;
+  reviewProfile: ReviewProfile;
+  pathFilters: string[];
   webhookStatus: "connected" | "error" | "missing";
   webhookUrl: string | null;
   webhookLastVerifiedAt: string | null;
@@ -42,6 +46,8 @@ export type GitlabProjectRow = {
   reviewStrategy: ReviewStrategy;
   reviewStrategyUpdatedByUserId: number | null;
   reviewStrategyUpdatedAt: string | null;
+  reviewProfile: ReviewProfile;
+  pathFilters: string[];
   createdAt: string;
   updatedAt: string;
 };
@@ -52,7 +58,6 @@ export type SharedProjectGroup = {
   representative: ProjectRow;
   skipLabels: string[];
   mrTargetBranches: string[];
-  mrTargetsAll: boolean;
   commitBranches: string[];
 };
 
@@ -70,6 +75,7 @@ export type ReviewRunRow = {
   commentId: number | null;
   commentUrl: string | null;
   findingsMarkdown: string | null;
+  structuredReview: StructuredReview | null;
   errorMessage: string | null;
 };
 
@@ -92,6 +98,7 @@ export type MergeRequestView = {
   reviewedAt: string | null;
   commentUrl: string | null;
   findingsMarkdown: string | null;
+  structuredReview: StructuredReview | null;
   errorMessage: string | null;
   reviewMeta: ReviewMeta | null;
 };
@@ -123,20 +130,24 @@ export type CommitReviewRunView = {
   authorName: string | null;
   committedDate: string | null;
   trigger: string;
+  reviewStrategyOverride: ReviewStrategy | null;
   status: string;
   startedAt: string;
   finishedAt: string | null;
   commentId: number | null;
   commentUrl: string | null;
   findingsMarkdown: string | null;
+  structuredReview: StructuredReview | null;
   errorMessage: string | null;
   reviewMeta: ReviewMeta | null;
 };
 
+export type ReviewFeedbackRating = "helpful" | "false_positive" | "too_minor" | "missed_issue";
+
 export type ReviewRunType = "mr" | "commit";
 export type ReviewEventLevel = "info" | "warn" | "error";
 export type ReviewJobKind = "commit_manual" | "commit_retry" | "mr_retry" | "scan_user" | "commit_webhook" | "mr_webhook";
-export type ReviewJobStatus = "queued" | "running" | "completed" | "failed";
+export type ReviewJobStatus = "queued" | "running" | "completed" | "failed" | "canceled";
 
 export type ReviewMeta = {
   model: string | null;
@@ -185,7 +196,6 @@ export class ReviewStateStore {
   async listProjects(userId: number, enabledOnly = false): Promise<ProjectRow[]> {
     const rows = await this.db.project.findMany({
       where: {
-        userId,
         ...(enabledOnly ? { enabled: true } : {})
       },
       include: { gitlabProject: true },
@@ -230,7 +240,7 @@ export class ReviewStateStore {
     input: { enabled: boolean; mrTargetBranches?: string[]; commitBranches?: string[] }
   ): Promise<ProjectRow> {
     const result = await this.db.project.updateMany({
-      where: { id, userId },
+      where: { id },
       data: {
         enabled: input.enabled,
         skipLabelsJson: JSON.stringify([]),
@@ -309,7 +319,7 @@ export class ReviewStateStore {
 
   async updateGitlabProjectReviewStrategy(userId: number, projectId: number, reviewStrategy: ReviewStrategy): Promise<ProjectRow> {
     const project = await this.db.project.findFirst({
-      where: { id: projectId, userId },
+      where: { id: projectId },
       include: { gitlabProject: true }
     });
     if (!project) throw new Error("Project not found");
@@ -326,6 +336,62 @@ export class ReviewStateStore {
       }
     });
     return this.getProject(userId, projectId);
+  }
+
+  async getProjectReviewConfig(userId: number, projectId: number): Promise<ProjectReviewConfig> {
+    const project = await this.db.project.findFirst({
+      where: { id: projectId },
+      include: { gitlabProject: { include: { reviewInstructions: { orderBy: { id: "asc" } } } } }
+    });
+    if (!project) throw new Error("Project not found");
+    if (!project.gitlabProject) throw new Error("Shared GitLab project is not linked");
+    return reviewConfigFromProject(project.gitlabProject, project.gitlabProject.reviewInstructions);
+  }
+
+  async getSharedProjectReviewConfig(gitlabProjectRefId: number): Promise<ProjectReviewConfig> {
+    const project = await this.db.gitlabProject.findUnique({
+      where: { id: gitlabProjectRefId },
+      include: { reviewInstructions: { orderBy: { id: "asc" } } }
+    });
+    if (!project) throw new Error("GitLab project not found");
+    return reviewConfigFromProject(project, project.reviewInstructions);
+  }
+
+  async updateProjectReviewConfig(
+    userId: number,
+    projectId: number,
+    input: { reviewProfile: ReviewProfile; pathFilters: string[]; instructions: { id?: number; pathGlob: string; instructions: string; enabled: boolean }[] }
+  ): Promise<ProjectReviewConfig> {
+    const project = await this.db.project.findFirst({ where: { id: projectId } });
+    if (!project) throw new Error("Project not found");
+    if (!project.gitlabProjectRefId) throw new Error("Shared GitLab project is not linked");
+
+    const timestamp = nowIso();
+    const normalizedInstructions = normalizeInstructions(input.instructions);
+    await this.db.$transaction(async (tx) => {
+      await tx.gitlabProject.update({
+        where: { id: project.gitlabProjectRefId! },
+        data: {
+          reviewProfile: input.reviewProfile,
+          pathFiltersJson: JSON.stringify(normalizePathFilters(input.pathFilters)),
+          updatedAt: timestamp
+        }
+      });
+      await tx.projectReviewInstruction.deleteMany({ where: { gitlabProjectRefId: project.gitlabProjectRefId! } });
+      if (normalizedInstructions.length) {
+        await tx.projectReviewInstruction.createMany({
+          data: normalizedInstructions.map((instruction) => ({
+            gitlabProjectRefId: project.gitlabProjectRefId!,
+            pathGlob: instruction.pathGlob,
+            instructions: instruction.instructions,
+            enabled: instruction.enabled,
+            createdAt: timestamp,
+            updatedAt: timestamp
+          }))
+        });
+      }
+    });
+    return this.getProjectReviewConfig(userId, projectId);
   }
 
   async getGitlabProjectByGitlabId(gitlabHost: string, gitlabProjectId: string): Promise<GitlabProjectRow | null> {
@@ -362,17 +428,21 @@ export class ReviewStateStore {
   }
 
   async deleteProject(userId: number, id: number): Promise<void> {
-    await this.db.project.deleteMany({ where: { id, userId } });
+    await this.db.project.deleteMany({ where: { id } });
+  }
+
+  async countProjectSubscriptions(gitlabProjectRefId: number): Promise<number> {
+    return this.db.project.count({ where: { gitlabProjectRefId } });
   }
 
   async getProject(userId: number, id: number): Promise<ProjectRow> {
-    const row = await this.db.project.findFirst({ where: { id, userId }, include: { gitlabProject: true } });
+    const row = await this.db.project.findFirst({ where: { id }, include: { gitlabProject: true } });
     if (!row) throw new Error("Project not found");
     return projectFromRow(row);
   }
 
   async findProjectByGitlabId(userId: number, gitlabProjectId: string): Promise<ProjectRow | null> {
-    const row = await this.db.project.findFirst({ where: { userId, gitlabProjectId }, include: { gitlabProject: true } });
+    const row = await this.db.project.findFirst({ where: { gitlabProjectId }, include: { gitlabProject: true } });
     return row ? projectFromRow(row) : null;
   }
 
@@ -398,14 +468,12 @@ export class ReviewStateStore {
 
     return [...grouped.values()].map((entry) => {
       const representative = entry.subscriptions[0];
-      const mrTargetsAll = entry.subscriptions.some((project) => project.mrTargetBranches.length === 0);
       return {
         gitlabProject: gitlabProjectFromRow(entry.gitlabProject),
         subscriptions: entry.subscriptions,
         representative,
         skipLabels: uniqueNonEmpty(entry.subscriptions.flatMap((project) => project.skipLabels)),
-        mrTargetBranches: mrTargetsAll ? [] : uniqueNonEmpty(entry.subscriptions.flatMap((project) => project.mrTargetBranches)),
-        mrTargetsAll,
+        mrTargetBranches: uniqueNonEmpty(entry.subscriptions.flatMap((project) => project.mrTargetBranches)),
         commitBranches: uniqueNonEmpty(entry.subscriptions.flatMap((project) => project.commitBranches))
       };
     });
@@ -442,33 +510,33 @@ export class ReviewStateStore {
   }
 
   async upsertMergeRequestShared(gitlabProjectRefId: number, representativeProjectId: number, mr: GitLabMergeRequest): Promise<void> {
-    await this.db.mergeRequest.upsert({
-      where: { gitlabProjectRefId_mrIid: { gitlabProjectRefId, mrIid: mr.iid } },
-      create: {
-        projectId: representativeProjectId,
+    const timestamp = nowIso();
+    const existing = await this.db.mergeRequest.findFirst({ where: { gitlabProjectRefId, mrIid: mr.iid } });
+    const data = {
+      projectId: representativeProjectId,
+      title: mr.title,
+      webUrl: mr.web_url,
+      authorUsername: mr.author?.username ?? null,
+      labelsJson: JSON.stringify(mr.labels ?? []),
+      headSha: mr.sha,
+      state: mr.state,
+      draft: mr.draft,
+      updatedAtGitlab: mr.updated_at,
+      observedAt: timestamp
+    };
+    if (existing) {
+      await this.db.mergeRequest.update({
+        where: { id: existing.id },
+        data
+      });
+      return;
+    }
+
+    await this.db.mergeRequest.create({
+      data: {
+        ...data,
         gitlabProjectRefId,
-        mrIid: mr.iid,
-        title: mr.title,
-        webUrl: mr.web_url,
-        authorUsername: mr.author?.username ?? null,
-        labelsJson: JSON.stringify(mr.labels ?? []),
-        headSha: mr.sha,
-        state: mr.state,
-        draft: mr.draft,
-        updatedAtGitlab: mr.updated_at,
-        observedAt: nowIso()
-      },
-      update: {
-        projectId: representativeProjectId,
-        title: mr.title,
-        webUrl: mr.web_url,
-        authorUsername: mr.author?.username ?? null,
-        labelsJson: JSON.stringify(mr.labels ?? []),
-        headSha: mr.sha,
-        state: mr.state,
-        draft: mr.draft,
-        updatedAtGitlab: mr.updated_at,
-        observedAt: nowIso()
+        mrIid: mr.iid
       }
     });
   }
@@ -516,15 +584,8 @@ export class ReviewStateStore {
   }
 
   async getRunById(userId: number, id: number): Promise<ReviewRunRow | null> {
-    const refs = await this.userGitlabProjectRefIds(userId);
     const row = await this.db.reviewRun.findFirst({
-      where: {
-        id,
-        OR: [
-          { project: { userId } },
-          ...(refs.length ? [{ gitlabProjectRefId: { in: refs } }] : [])
-        ]
-      },
+      where: { id },
       include: { project: true }
     });
     return row ? reviewRunFromRow(row, row.project) : null;
@@ -594,7 +655,8 @@ export class ReviewStateStore {
   async finishNoFindings(
     runId: number,
     markdown: string | null = null,
-    comment: { id: number | null; url: string | null } | null = null
+    comment: { id: number | null; url: string | null } | null = null,
+    structuredReview: StructuredReview | null = null
   ): Promise<void> {
     await this.db.reviewRun.update({
       where: { id: runId },
@@ -604,6 +666,7 @@ export class ReviewStateStore {
         commentId: comment?.id ?? null,
         commentUrl: comment?.url ?? null,
         findingsMarkdown: markdown,
+        structuredReviewJson: structuredReview ? JSON.stringify(structuredReview) : null,
         errorMessage: null
       }
     });
@@ -626,7 +689,27 @@ export class ReviewStateStore {
     return updated;
   }
 
-  async finishCommented(runId: number, comment: { id: number; url: string | null }, markdown: string): Promise<void> {
+  async cancelRun(userId: number, runId: number): Promise<ReviewRunRow> {
+    const run = await this.getRunById(userId, runId);
+    if (!run) throw new Error("Review run not found");
+    if (!isCancelableRunStatus(run.status)) throw new Error("Review run cannot be canceled");
+
+    const timestamp = nowIso();
+    await this.db.reviewRun.update({
+      where: { id: runId },
+      data: {
+        status: "canceled",
+        finishedAt: timestamp,
+        errorMessage: null
+      }
+    });
+    await this.cancelJobsForRun("mr", runId, timestamp);
+    const updated = await this.getRunById(userId, runId);
+    if (!updated) throw new Error("Review run not found");
+    return updated;
+  }
+
+  async finishCommented(runId: number, comment: { id: number; url: string | null }, markdown: string, structuredReview: StructuredReview | null = null): Promise<void> {
     await this.db.reviewRun.update({
       where: { id: runId },
       data: {
@@ -635,6 +718,7 @@ export class ReviewStateStore {
         commentId: comment.id,
         commentUrl: comment.url,
         findingsMarkdown: markdown,
+        structuredReviewJson: structuredReview ? JSON.stringify(structuredReview) : null,
         errorMessage: null
       }
     });
@@ -695,21 +779,28 @@ export class ReviewStateStore {
     lastError: string | null = null
   ): Promise<BranchWatchStateRow> {
     const timestamp = nowIso();
-    const row = await this.db.branchWatchState.upsert({
-      where: { gitlabProjectRefId_branchName: { gitlabProjectRefId, branchName } },
-      create: {
+    const existing = await this.db.branchWatchState.findFirst({ where: { gitlabProjectRefId, branchName } });
+    if (existing) {
+      const row = await this.db.branchWatchState.update({
+        where: { id: existing.id },
+        data: {
+          projectId: representativeProjectId,
+          lastSeenSha,
+          lastError,
+          updatedAt: timestamp
+        }
+      });
+      return branchWatchStateFromRow(row);
+    }
+
+    const row = await this.db.branchWatchState.create({
+      data: {
         projectId: representativeProjectId,
         gitlabProjectRefId,
         branchName,
         lastSeenSha,
         lastError,
         createdAt: timestamp,
-        updatedAt: timestamp
-      },
-      update: {
-        projectId: representativeProjectId,
-        lastSeenSha,
-        lastError,
         updatedAt: timestamp
       }
     });
@@ -744,22 +835,15 @@ export class ReviewStateStore {
   async findSharedCommitRun(gitlabProjectRefId: number, commitSha: string): Promise<CommitReviewRunView | null> {
     const row = await this.db.commitReviewRun.findFirst({
       where: { gitlabProjectRefId, commitSha },
-      include: { project: true }
+      include: { project: true, gitlabProject: true }
     });
     return row ? commitReviewRunFromRow(row, row.project) : null;
   }
 
   async getCommitRunById(userId: number, id: number): Promise<CommitReviewRunView | null> {
-    const refs = await this.userGitlabProjectRefIds(userId);
     const row = await this.db.commitReviewRun.findFirst({
-      where: {
-        id,
-        OR: [
-          { userId },
-          ...(refs.length ? [{ gitlabProjectRefId: { in: refs } }] : [])
-        ]
-      },
-      include: { project: true }
+      where: { id },
+      include: { project: true, gitlabProject: true }
     });
     return row ? commitReviewRunFromRow(row) : null;
   }
@@ -767,7 +851,7 @@ export class ReviewStateStore {
   async getCommitRunForSha(userId: number, gitlabProjectId: string, commitSha: string): Promise<CommitReviewRunView | null> {
     const row = await this.db.commitReviewRun.findFirst({
       where: { userId, gitlabProjectId, commitSha },
-      include: { project: true }
+      include: { project: true, gitlabProject: true }
     });
     return row ? commitReviewRunFromRow(row) : null;
   }
@@ -779,7 +863,8 @@ export class ReviewStateStore {
     branchName: string | null,
     commit: GitLabCommit,
     trigger: CommitReviewTrigger,
-    status = "running"
+    status = "running",
+    reviewStrategyOverride: ReviewStrategy | null = null
   ): Promise<number> {
     const timestamp = nowIso();
     const title = commit.title ?? commit.message?.split("\n")[0] ?? commit.id.slice(0, 10);
@@ -795,6 +880,7 @@ export class ReviewStateStore {
           authorName: commit.author_name ?? null,
           committedDate: commit.committed_date ?? commit.created_at ?? null,
           trigger,
+          reviewStrategyOverride,
           status,
           startedAt: timestamp,
           finishedAt: null,
@@ -816,6 +902,7 @@ export class ReviewStateStore {
         authorName: commit.author_name ?? null,
         committedDate: commit.committed_date ?? commit.created_at ?? null,
         trigger,
+        reviewStrategyOverride,
         status,
         startedAt: timestamp
       }
@@ -831,7 +918,8 @@ export class ReviewStateStore {
     branchName: string | null,
     commit: GitLabCommit,
     trigger: CommitReviewTrigger,
-    status = "running"
+    status = "running",
+    reviewStrategyOverride: ReviewStrategy | null = null
   ): Promise<number> {
     const timestamp = nowIso();
     const title = commit.title ?? commit.message?.split("\n")[0] ?? commit.id.slice(0, 10);
@@ -848,6 +936,7 @@ export class ReviewStateStore {
           authorName: commit.author_name ?? null,
           committedDate: commit.committed_date ?? commit.created_at ?? null,
           trigger,
+          reviewStrategyOverride,
           status,
           startedAt: timestamp,
           finishedAt: null,
@@ -870,6 +959,7 @@ export class ReviewStateStore {
         authorName: commit.author_name ?? null,
         committedDate: commit.committed_date ?? commit.created_at ?? null,
         trigger,
+        reviewStrategyOverride,
         status,
         startedAt: timestamp
       }
@@ -880,7 +970,8 @@ export class ReviewStateStore {
   async finishCommitNoFindings(
     runId: number,
     markdown: string | null = null,
-    comment: { id: number | null; url: string | null } | null = null
+    comment: { id: number | null; url: string | null } | null = null,
+    structuredReview: StructuredReview | null = null
   ): Promise<void> {
     await this.db.commitReviewRun.update({
       where: { id: runId },
@@ -890,6 +981,7 @@ export class ReviewStateStore {
         commentId: comment?.id ?? null,
         commentUrl: comment?.url ?? null,
         findingsMarkdown: markdown,
+        structuredReviewJson: structuredReview ? JSON.stringify(structuredReview) : null,
         errorMessage: null
       }
     });
@@ -912,7 +1004,50 @@ export class ReviewStateStore {
     return updated;
   }
 
-  async finishCommitCommented(runId: number, comment: { id: number | null; url: string | null }, markdown: string): Promise<void> {
+  async cancelCommitRun(userId: number, runId: number): Promise<CommitReviewRunView> {
+    const run = await this.getCommitRunById(userId, runId);
+    if (!run) throw new Error("Commit review run not found");
+    if (!isCancelableRunStatus(run.status)) throw new Error("Commit review run cannot be canceled");
+
+    const timestamp = nowIso();
+    await this.db.commitReviewRun.update({
+      where: { id: runId },
+      data: {
+        status: "canceled",
+        finishedAt: timestamp,
+        errorMessage: null
+      }
+    });
+    await this.cancelJobsForRun("commit", runId, timestamp);
+    const updated = await this.getCommitRunById(userId, runId);
+    if (!updated) throw new Error("Commit review run not found");
+    return updated;
+  }
+
+  async markRunCanceled(runType: ReviewRunType, runId: number): Promise<void> {
+    const timestamp = nowIso();
+    if (runType === "commit") {
+      await this.db.commitReviewRun.updateMany({
+        where: { id: runId, status: { in: ["queued", "running"] } },
+        data: {
+          status: "canceled",
+          finishedAt: timestamp,
+          errorMessage: null
+        }
+      });
+      return;
+    }
+    await this.db.reviewRun.updateMany({
+      where: { id: runId, status: { in: ["queued", "running"] } },
+      data: {
+        status: "canceled",
+        finishedAt: timestamp,
+        errorMessage: null
+      }
+    });
+  }
+
+  async finishCommitCommented(runId: number, comment: { id: number | null; url: string | null }, markdown: string, structuredReview: StructuredReview | null = null): Promise<void> {
     await this.db.commitReviewRun.update({
       where: { id: runId },
       data: {
@@ -921,6 +1056,7 @@ export class ReviewStateStore {
         commentId: comment.id,
         commentUrl: comment.url,
         findingsMarkdown: markdown,
+        structuredReviewJson: structuredReview ? JSON.stringify(structuredReview) : null,
         errorMessage: null
       }
     });
@@ -1016,6 +1152,14 @@ export class ReviewStateStore {
     });
   }
 
+  async isReviewJobCanceled(id: number): Promise<boolean> {
+    const row = await this.db.reviewJob.findUnique({
+      where: { id },
+      select: { status: true }
+    });
+    return row?.status === "canceled";
+  }
+
   async recoverStaleRunningJobs(staleMs: number): Promise<number> {
     const cutoff = new Date(Date.now() - staleMs).toISOString();
     const rows = await this.db.reviewJob.findMany({
@@ -1080,41 +1224,71 @@ export class ReviewStateStore {
   }
 
   private async releaseLocksForRecoveredJob(job: ReviewJob, staleCutoff: string): Promise<void> {
+    await this.releaseLocksForJob(job, staleCutoff);
+  }
+
+  private async releaseLocksForJob(job: ReviewJob, staleCutoff?: string): Promise<void> {
     const payload = parseJsonRecord(job.payloadJson);
     const gitlabProjectRefId = numberFromMetadata(payload, "gitlabProjectRefId");
     const gitlabProjectId = stringFromMetadata(payload, "gitlabProjectId");
     const commitSha = stringFromMetadata(payload, "commitSha");
     const mrIid = numberFromMetadata(payload, "mrIid");
     const headSha = stringFromMetadata(payload, "headSha");
-    const lockKeys: string[] = [];
+    const lockKeys = new Set<string>();
 
     if (gitlabProjectRefId) {
       const project = await this.db.gitlabProject.findUnique({ where: { id: gitlabProjectRefId } });
       if (project) {
-        lockKeys.push(`project:${project.gitlabHost}:${project.gitlabProjectId}`);
-        if (job.runType === "commit" && commitSha) lockKeys.push(`commit:${project.id}:${commitSha}`);
-        if (job.runType === "mr" && mrIid && headSha) lockKeys.push(`mr:${project.id}:${mrIid}:${headSha}`);
+        lockKeys.add(`project:${project.gitlabHost}:${project.gitlabProjectId}`);
+        if (job.runType === "commit" && commitSha) lockKeys.add(`commit:${project.id}:${commitSha}`);
+        if (job.runType === "mr" && mrIid && headSha) lockKeys.add(`mr:${project.id}:${mrIid}:${headSha}`);
       }
-    } else if (job.runType === "commit" && gitlabProjectId && commitSha) {
-      lockKeys.push(`commit:${job.userId}:${gitlabProjectId}:${commitSha}`);
-    } else if (job.runType === "mr" && job.runId) {
-      const run = await this.db.reviewRun.findUnique({ where: { id: job.runId } });
-      if (run) lockKeys.push(`${run.projectId}:${run.mrIid}:${run.headSha}`);
     }
 
-    if (!lockKeys.length) return;
+    if (job.runType === "commit" && gitlabProjectId && commitSha) {
+      lockKeys.add(`commit:${job.userId}:${gitlabProjectId}:${commitSha}`);
+    }
+
+    if (job.runType === "commit" && job.runId) {
+      const run = await this.db.commitReviewRun.findUnique({ where: { id: job.runId } });
+      if (run?.gitlabProjectRefId) {
+        const project = await this.db.gitlabProject.findUnique({ where: { id: run.gitlabProjectRefId } });
+        if (project) {
+          lockKeys.add(`project:${project.gitlabHost}:${project.gitlabProjectId}`);
+          lockKeys.add(`commit:${project.id}:${run.commitSha}`);
+        }
+      } else if (run) {
+        lockKeys.add(`commit:${job.userId}:${run.gitlabProjectId}:${run.commitSha}`);
+      }
+    }
+
+    if (job.runType === "mr" && job.runId) {
+      const run = await this.db.reviewRun.findUnique({ where: { id: job.runId } });
+      if (run?.gitlabProjectRefId) {
+        const project = await this.db.gitlabProject.findUnique({ where: { id: run.gitlabProjectRefId } });
+        if (project) {
+          lockKeys.add(`project:${project.gitlabHost}:${project.gitlabProjectId}`);
+          lockKeys.add(`mr:${project.id}:${run.mrIid}:${run.headSha}`);
+        }
+      } else if (run) {
+        lockKeys.add(`${run.projectId}:${run.mrIid}:${run.headSha}`);
+      }
+    }
+
+    const keys = [...lockKeys];
+    if (!keys.length) return;
     await this.db.reviewLock.deleteMany({
       where: {
-        lockKey: { in: lockKeys },
-        acquiredAt: { lt: staleCutoff }
+        lockKey: { in: keys },
+        ...(staleCutoff ? { acquiredAt: { lt: staleCutoff } } : {})
       }
     });
   }
 
   async completeReviewJob(id: number): Promise<void> {
     const timestamp = nowIso();
-    await this.db.reviewJob.update({
-      where: { id },
+    await this.db.reviewJob.updateMany({
+      where: { id, status: { not: "canceled" } },
       data: {
         status: "completed",
         updatedAt: timestamp,
@@ -1126,8 +1300,8 @@ export class ReviewStateStore {
 
   async failReviewJob(id: number, error: unknown): Promise<void> {
     const timestamp = nowIso();
-    await this.db.reviewJob.update({
-      where: { id },
+    await this.db.reviewJob.updateMany({
+      where: { id, status: { not: "canceled" } },
       data: {
         status: "failed",
         updatedAt: timestamp,
@@ -1138,8 +1312,8 @@ export class ReviewStateStore {
   }
 
   async requeueReviewJob(id: number, reason: string | null = null, delayMs = 10_000): Promise<void> {
-    await this.db.reviewJob.update({
-      where: { id },
+    await this.db.reviewJob.updateMany({
+      where: { id, status: { not: "canceled" } },
       data: {
         status: "queued",
         updatedAt: new Date(Date.now() + delayMs).toISOString(),
@@ -1158,6 +1332,114 @@ export class ReviewStateStore {
       orderBy: [{ createdAt: "asc" }, { id: "asc" }]
     });
     return rows.map(reviewEventFromRow);
+  }
+
+  async addReviewFeedback(
+    userId: number,
+    runType: ReviewRunType,
+    runId: number,
+    input: { issueFingerprint: string; rating: ReviewFeedbackRating; note?: string | null }
+  ): Promise<void> {
+    const run = runType === "mr" ? await this.getRunById(userId, runId) : await this.getCommitRunById(userId, runId);
+    if (!run) throw new Error("Review run not found");
+    await this.db.reviewFeedback.upsert({
+      where: {
+        userId_runType_runId_issueFingerprint: {
+          userId,
+          runType,
+          runId,
+          issueFingerprint: input.issueFingerprint
+        }
+      },
+      create: {
+        userId,
+        runType,
+        runId,
+        issueFingerprint: input.issueFingerprint,
+        rating: input.rating,
+        note: input.note?.trim() || null,
+        createdAt: nowIso()
+      },
+      update: {
+        rating: input.rating,
+        note: input.note?.trim() || null,
+        createdAt: nowIso()
+      }
+    });
+    await this.addReviewEvent({
+      runType,
+      runId,
+      level: "info",
+      step: "review_feedback_recorded",
+      message: "Review feedback recorded.",
+      metadata: {
+        issueFingerprint: input.issueFingerprint,
+        rating: input.rating
+      }
+    });
+  }
+
+  async reviewQualityStats(userId: number): Promise<{
+    feedbackCount: number;
+    falsePositiveCount: number;
+    canceledOrFailedCount: number;
+    averageReviewSeconds: number | null;
+  }> {
+    const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const [feedbackCount, falsePositiveCount, mrRuns, commitRuns] = await Promise.all([
+      this.db.reviewFeedback.count({ where: { createdAt: { gte: since } } }),
+      this.db.reviewFeedback.count({ where: { rating: "false_positive", createdAt: { gte: since } } }),
+      this.db.reviewRun.findMany({
+        where: {
+          startedAt: { gte: since }
+        },
+        select: { status: true, startedAt: true, finishedAt: true }
+      }),
+      this.db.commitReviewRun.findMany({
+        where: {
+          startedAt: { gte: since }
+        },
+        select: { status: true, startedAt: true, finishedAt: true }
+      })
+    ]);
+    const runs = [...mrRuns, ...commitRuns];
+    const durations = runs
+      .map((run) => run.finishedAt ? Date.parse(run.finishedAt) - Date.parse(run.startedAt) : null)
+      .filter((duration): duration is number => typeof duration === "number" && Number.isFinite(duration) && duration >= 0);
+    return {
+      feedbackCount,
+      falsePositiveCount,
+      canceledOrFailedCount: runs.filter((run) => run.status === "failed" || run.status === "canceled").length,
+      averageReviewSeconds: durations.length ? Math.round(durations.reduce((sum, value) => sum + value, 0) / durations.length / 1000) : null
+    };
+  }
+
+  private async cancelJobsForRun(runType: ReviewRunType, runId: number, timestamp = nowIso()): Promise<void> {
+    const jobs = await this.db.reviewJob.findMany({
+      where: {
+        runType,
+        runId,
+        status: { in: ["queued", "running"] }
+      }
+    });
+
+    await this.db.reviewJob.updateMany({
+      where: {
+        runType,
+        runId,
+        status: { in: ["queued", "running"] }
+      },
+      data: {
+        status: "canceled",
+        updatedAt: timestamp,
+        finishedAt: timestamp,
+        errorMessage: "Canceled by user"
+      }
+    });
+
+    for (const job of jobs) {
+      await this.releaseLocksForJob(job);
+    }
   }
 
   async acquireLock(key: string, ttlMs = 30 * 60 * 1000): Promise<boolean> {
@@ -1186,19 +1468,12 @@ export class ReviewStateStore {
   }
 
   async listMergeRequestViews(userId: number): Promise<MergeRequestView[]> {
-    const userProjects = await this.db.project.findMany({ where: { userId } });
+    const userProjects = await this.db.project.findMany();
     const projectByRef = new Map<number, Project>();
     for (const project of userProjects) {
       if (project.gitlabProjectRefId) projectByRef.set(project.gitlabProjectRefId, project);
     }
-    const refIds = [...projectByRef.keys()];
     const rows = await this.db.mergeRequest.findMany({
-      where: {
-        OR: [
-          { project: { userId } },
-          ...(refIds.length ? [{ gitlabProjectRefId: { in: refIds } }] : [])
-        ]
-      },
       include: { project: true },
       orderBy: { observedAt: "desc" }
     });
@@ -1208,11 +1483,9 @@ export class ReviewStateStore {
         row,
         run: row.headSha
           ? await this.db.reviewRun.findFirst({
-              where: {
-                projectId: row.projectId,
-                mrIid: row.mrIid,
-                headSha: row.headSha
-              },
+              where: row.gitlabProjectRefId
+                ? { gitlabProjectRefId: row.gitlabProjectRefId, mrIid: row.mrIid, headSha: row.headSha }
+                : { projectId: row.projectId, mrIid: row.mrIid, headSha: row.headSha },
               orderBy: { startedAt: "desc" }
             })
           : null
@@ -1230,20 +1503,13 @@ export class ReviewStateStore {
   }
 
   async listCommitReviewRuns(userId: number): Promise<CommitReviewRunView[]> {
-    const userProjects = await this.db.project.findMany({ where: { userId } });
+    const userProjects = await this.db.project.findMany();
     const projectByRef = new Map<number, Project>();
     for (const project of userProjects) {
       if (project.gitlabProjectRefId) projectByRef.set(project.gitlabProjectRefId, project);
     }
-    const refIds = [...projectByRef.keys()];
     const rows = await this.db.commitReviewRun.findMany({
-      where: {
-        OR: [
-          { userId },
-          ...(refIds.length ? [{ gitlabProjectRefId: { in: refIds } }] : [])
-        ]
-      },
-      include: { project: true },
+      include: { project: true, gitlabProject: true },
       orderBy: { startedAt: "desc" }
     });
     const reviewMetaByRunId = await this.reviewMetaByRunIds("commit", rows.map((row) => row.id));
@@ -1263,16 +1529,11 @@ export class ReviewStateStore {
     failedCount: number;
     commentedCount: number;
   }> {
-    const refIds = await this.userGitlabProjectRefIds(userId);
     const [projectCount, mrCount, runningCount, failedCount, commentedCount] = await Promise.all([
-      this.db.project.count({ where: { userId, enabled: true } }),
+      this.db.project.count({ where: { enabled: true } }),
       this.db.mergeRequest.count({
         where: {
-          state: "opened",
-          OR: [
-            { project: { userId } },
-            ...(refIds.length ? [{ gitlabProjectRefId: { in: refIds } }] : [])
-          ]
+          state: "opened"
         }
       }),
       this.countRunsByStatuses(userId, ["queued", "running"]),
@@ -1287,24 +1548,15 @@ export class ReviewStateStore {
   }
 
   private async countRunsByStatuses(userId: number, statuses: string[]): Promise<number> {
-    const refIds = await this.userGitlabProjectRefIds(userId);
     const [mergeRequestRuns, commitRuns] = await Promise.all([
       this.db.reviewRun.count({
         where: {
-          status: { in: statuses },
-          OR: [
-            { project: { userId } },
-            ...(refIds.length ? [{ gitlabProjectRefId: { in: refIds } }] : [])
-          ]
+          status: { in: statuses }
         }
       }),
       this.db.commitReviewRun.count({
         where: {
-          status: { in: statuses },
-          OR: [
-            { userId },
-            ...(refIds.length ? [{ gitlabProjectRefId: { in: refIds } }] : [])
-          ]
+          status: { in: statuses }
         }
       })
     ]);
@@ -1312,6 +1564,7 @@ export class ReviewStateStore {
   }
 
   async clearReviewHistory(): Promise<void> {
+    await this.db.reviewFeedback.deleteMany();
     await this.db.reviewEvent.deleteMany();
     await this.db.reviewJob.deleteMany();
     await this.db.reviewLock.deleteMany();
@@ -1389,6 +1642,8 @@ function projectFromRow(row: Project & { gitlabProject?: GitlabProject | null })
     reviewStrategy: parseReviewStrategy(gitlabProject?.reviewStrategy),
     reviewStrategyUpdatedByUserId: gitlabProject?.reviewStrategyUpdatedByUserId ?? null,
     reviewStrategyUpdatedAt: gitlabProject?.reviewStrategyUpdatedAt ?? null,
+    reviewProfile: parseReviewProfile(gitlabProject?.reviewProfile),
+    pathFilters: parseJsonArray(gitlabProject?.pathFiltersJson ?? JSON.stringify(defaultPathFilters())),
     webhookStatus: webhookStatus(gitlabProject ?? null),
     webhookUrl: gitlabProject?.webhookUrl ?? null,
     webhookLastVerifiedAt: gitlabProject?.webhookLastVerifiedAt ?? null,
@@ -1415,8 +1670,27 @@ function gitlabProjectFromRow(row: GitlabProject): GitlabProjectRow {
     reviewStrategy: parseReviewStrategy(row.reviewStrategy),
     reviewStrategyUpdatedByUserId: row.reviewStrategyUpdatedByUserId,
     reviewStrategyUpdatedAt: row.reviewStrategyUpdatedAt,
+    reviewProfile: parseReviewProfile(row.reviewProfile),
+    pathFilters: parseJsonArray(row.pathFiltersJson),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt
+  };
+}
+
+function reviewConfigFromProject(
+  project: GitlabProject & { reviewInstructions?: PrismaProjectReviewInstruction[] },
+  instructions: PrismaProjectReviewInstruction[] = []
+): ProjectReviewConfig {
+  const pathFilters = parseJsonArray(project.pathFiltersJson);
+  return {
+    reviewProfile: parseReviewProfile(project.reviewProfile),
+    pathFilters: pathFilters.length ? pathFilters : defaultPathFilters(),
+    instructions: instructions.map((instruction) => ({
+      id: instruction.id,
+      pathGlob: instruction.pathGlob,
+      instructions: instruction.instructions,
+      enabled: instruction.enabled
+    }))
   };
 }
 
@@ -1455,6 +1729,7 @@ function reviewRunFromRow(row: ReviewRun, project: Project): ReviewRunRow {
     commentId: row.commentId,
     commentUrl: row.commentUrl,
     findingsMarkdown: row.findingsMarkdown,
+    structuredReview: parseStructuredReviewJson(row.structuredReviewJson),
     errorMessage: row.errorMessage
   };
 }
@@ -1479,13 +1754,14 @@ function mergeRequestViewFromRow(row: MergeRequest, project: Project, run: Revie
     reviewedAt: run?.finishedAt ?? null,
     commentUrl: run?.commentUrl ?? null,
     findingsMarkdown: run?.findingsMarkdown ?? null,
+    structuredReview: parseStructuredReviewJson(run?.structuredReviewJson ?? null),
     errorMessage: run?.errorMessage ?? null,
     reviewMeta
   };
 }
 
 function commitReviewRunFromRow(
-  row: CommitReviewRun & { project?: Project | null },
+  row: CommitReviewRun & { project?: Project | null; gitlabProject?: GitlabProject | null },
   displayProject = row.project,
   reviewMeta: ReviewMeta | null = null
 ): CommitReviewRunView {
@@ -1495,7 +1771,7 @@ function commitReviewRunFromRow(
     projectId: row.projectId,
     gitlabProjectRefId: row.gitlabProjectRefId,
     gitlabProjectId: row.gitlabProjectId,
-    projectName: displayProject?.displayName ?? row.gitlabProjectId,
+    projectName: displayProject?.displayName ?? row.gitlabProject?.nameWithNamespace ?? row.gitlabProject?.pathWithNamespace ?? row.gitlabProjectId,
     branchName: row.branchName,
     commitSha: row.commitSha,
     commitTitle: row.commitTitle,
@@ -1503,15 +1779,26 @@ function commitReviewRunFromRow(
     authorName: row.authorName,
     committedDate: row.committedDate,
     trigger: row.trigger,
+    reviewStrategyOverride: row.reviewStrategyOverride ? parseReviewStrategy(row.reviewStrategyOverride) : null,
     status: row.status,
     startedAt: row.startedAt,
     finishedAt: row.finishedAt,
     commentId: row.commentId,
     commentUrl: row.commentUrl,
     findingsMarkdown: row.findingsMarkdown,
+    structuredReview: parseStructuredReviewJson(row.structuredReviewJson),
     errorMessage: row.errorMessage,
     reviewMeta
   };
+}
+
+function parseStructuredReviewJson(value: string | null | undefined): StructuredReview | null {
+  if (!value) return null;
+  try {
+    return JSON.parse(value) as StructuredReview;
+  } catch {
+    return null;
+  }
 }
 
 function reviewEventFromRow(row: ReviewEvent): ReviewEventView {
@@ -1557,7 +1844,11 @@ function isReviewJobKind(value: string): value is ReviewJobKind {
 }
 
 function isReviewJobStatus(value: string): value is ReviewJobStatus {
-  return value === "queued" || value === "running" || value === "completed" || value === "failed";
+  return value === "queued" || value === "running" || value === "completed" || value === "failed" || value === "canceled";
+}
+
+function isCancelableRunStatus(value: string): boolean {
+  return value === "queued" || value === "running";
 }
 
 function uniqueNonEmpty(values: string[]): string[] {

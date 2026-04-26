@@ -224,12 +224,12 @@ function Metric({ label, value }: { label: string; value: number | null }) {
 }
 
 function progressIndex(events: ReviewEvent[], status: string | null): number {
-  if (status === "commented" || status === "no_findings" || status === "failed") return 5;
+  if (status === "commented" || status === "no_findings" || status === "failed" || status === "canceled") return 5;
   const latestStep = events.at(-1)?.step;
   if (!latestStep) return status === "running" ? 1 : 0;
-  if (["run_finished", "comment_posted", "no_findings", "run_failed"].includes(latestStep)) return 5;
+  if (["run_finished", "comment_posted", "no_findings", "run_failed", "run_canceled"].includes(latestStep)) return 5;
   if (latestStep === "codex_finished") return 4;
-  if (latestStep.startsWith("codex_") || latestStep === "review_strategy_selected") return 3;
+  if (latestStep.startsWith("codex_") || latestStep === "review_strategy_selected" || latestStep.startsWith("tool_runner_")) return 3;
   if (latestStep.startsWith("workspace_")) return 2;
   if (["job_claimed", "run_started", "bot_token_loaded", "gitlab_project_resolved", "lock_acquired", "diff_fetched"].includes(latestStep)) return 1;
   return 0;
@@ -237,6 +237,7 @@ function progressIndex(events: ReviewEvent[], status: string | null): number {
 
 function progressClass(index: number, activeIndex: number, status: string | null): string {
   if (status === "failed" && index === activeIndex) return "failed";
+  if (status === "canceled" && index === activeIndex) return "failed";
   if (index < activeIndex) return "done";
   if (index === activeIndex) return "active";
   return "";
@@ -262,6 +263,10 @@ const STEP_LABELS: Record<string, string> = {
   diff_fetched: "diff 가져오기",
   workspace_checkout_started: "workspace checkout 시작",
   workspace_checkout_finished: "workspace checkout 완료",
+  project_instructions_loaded: "프로젝트 리뷰 규칙 확인",
+  tool_runner_started: "정적 분석 시작",
+  tool_runner_result: "정적 분석 결과",
+  tool_runner_failed: "정적 분석 실패",
   review_strategy_selected: "리뷰 전략 선택",
   codex_triage_started: "Auto triage 시작",
   codex_triage_finished: "Auto triage 완료",
@@ -272,8 +277,12 @@ const STEP_LABELS: Record<string, string> = {
   codex_usage: "토큰 사용량",
   codex_finished: "Codex 리뷰 완료",
   comment_posted: "댓글 게시",
+  inline_comment_posted: "인라인 댓글 게시",
+  inline_comment_failed: "인라인 댓글 실패",
+  review_feedback_recorded: "리뷰 피드백 저장",
   no_findings: "이슈 없음",
   run_failed: "리뷰 실패",
+  run_canceled: "리뷰 취소",
   run_finished: "리뷰 완료"
 };
 
@@ -291,6 +300,10 @@ const EVENT_MESSAGES: Record<string, string> = {
   diff_fetched: "GitLab diff를 가져왔습니다.",
   workspace_checkout_started: "workspace checkout을 시작했습니다.",
   workspace_checkout_finished: "workspace checkout을 완료했습니다.",
+  project_instructions_loaded: "프로젝트 리뷰 규칙과 path instruction을 확인했습니다.",
+  tool_runner_started: "읽기 전용 정적 분석을 시작했습니다.",
+  tool_runner_result: "읽기 전용 정적 분석 결과를 기록했습니다.",
+  tool_runner_failed: "읽기 전용 정적 분석 일부가 실패했습니다.",
   review_strategy_selected: "리뷰 전략과 실행 강도를 선택했습니다.",
   codex_triage_started: "Auto 전략이 본 리뷰 강도를 판단하고 있습니다.",
   codex_triage_finished: "Auto triage가 본 리뷰 강도를 선택했습니다.",
@@ -298,8 +311,12 @@ const EVENT_MESSAGES: Record<string, string> = {
   codex_started: "Codex 리뷰가 시작되었습니다.",
   codex_finished: "Codex 리뷰가 완료되었습니다.",
   comment_posted: "GitLab 댓글을 게시했습니다.",
+  inline_comment_posted: "GitLab 인라인 댓글을 처리했습니다.",
+  inline_comment_failed: "GitLab 인라인 댓글을 게시하지 못했습니다.",
+  review_feedback_recorded: "리뷰 피드백을 저장했습니다.",
   no_findings: "액션이 필요한 이슈는 없습니다.",
   run_failed: "리뷰 실행이 실패했습니다.",
+  run_canceled: "리뷰가 취소되었습니다.",
   run_finished: "리뷰 실행이 완료되었습니다."
 };
 
@@ -349,7 +366,7 @@ function riskLevelLabel(riskLevel: string): string {
 }
 
 function toolLabel(tool: string): string {
-  if (tool === "command_execution") return "읽기 전용 shell 명령";
+  if (tool === "command_execution") return "코드 탐색 shell 명령";
   if (tool === "web_search") return "웹 검색";
   return tool;
 }

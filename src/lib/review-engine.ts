@@ -1,4 +1,4 @@
-import { Codex, type ThreadEvent, type ThreadItem, type Usage } from "@openai/codex-sdk";
+import { Codex, type SandboxMode, type ThreadEvent, type ThreadItem, type Usage } from "@openai/codex-sdk";
 import {
   DEFAULT_CODEX_REVIEW_MODEL,
   DEFAULT_CODEX_REVIEW_REASONING_EFFORT,
@@ -40,7 +40,8 @@ export interface Reviewer {
   review(
     input: ReviewPromptInput,
     onEvent?: (event: ReviewEngineEvent) => Promise<void> | void,
-    settings?: CodexReviewRuntimeSettings
+    settings?: CodexReviewRuntimeSettings,
+    options?: { signal?: AbortSignal }
   ): Promise<ReviewResult>;
 }
 
@@ -49,6 +50,7 @@ export type CodexReviewEngineOptions = {
   codexHome?: string;
   model?: string;
   modelReasoningEffort?: CodexReviewReasoningEffort;
+  sandboxMode?: SandboxMode;
 };
 
 export class CodexReviewEngine implements Reviewer {
@@ -57,7 +59,8 @@ export class CodexReviewEngine implements Reviewer {
   async review(
     input: ReviewPromptInput,
     onEvent?: (event: ReviewEngineEvent) => Promise<void> | void,
-    settings?: CodexReviewRuntimeSettings
+    settings?: CodexReviewRuntimeSettings,
+    options: { signal?: AbortSignal } = {}
   ): Promise<ReviewResult> {
     const codex = new Codex({
       ...(this.options.codexBin ? { codexPathOverride: this.options.codexBin } : {}),
@@ -68,12 +71,15 @@ export class CodexReviewEngine implements Reviewer {
       modelReasoningEffort: settings?.reasoningEffort ?? this.options.modelReasoningEffort ?? REVIEW_REASONING_EFFORT,
       ...(input.workingDirectory ? { workingDirectory: input.workingDirectory } : {}),
       skipGitRepoCheck: true,
-      sandboxMode: "read-only",
+      sandboxMode: this.options.sandboxMode ?? "read-only",
       approvalPolicy: "never"
     });
 
     const prompt = buildReviewPrompt(input);
-    const { events } = await thread.runStreamed(prompt, { outputSchema: REVIEW_OUTPUT_SCHEMA });
+    const { events } = await thread.runStreamed(prompt, {
+      outputSchema: REVIEW_OUTPUT_SCHEMA,
+      ...(options.signal ? { signal: options.signal } : {})
+    });
     const { finalResponse, usage } = await collectReviewEvents(events, onEvent);
     const raw = finalResponse.trim();
     if (!raw) throw new Error("Codex review response was empty");
@@ -169,7 +175,7 @@ async function emitToolEvent(onEvent: ((event: ReviewEngineEvent) => Promise<voi
     await emit(onEvent, {
       level: item.status === "failed" ? "warn" : "info",
       step: "codex_tool_used",
-      message: "Codex executed a read-only command.",
+      message: "Codex executed a shell command for repository inspection.",
       metadata: {
         tool: "command_execution",
         command: sanitizeCommand(item.command),

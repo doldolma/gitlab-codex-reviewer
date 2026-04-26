@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { ExternalLink, RefreshCw, Trash2 } from "lucide-react";
+import { ExternalLink, Info, RefreshCw, Settings, Trash2 } from "lucide-react";
 import { BranchMultiCombobox } from "./gitlab-combobox";
 import type { Project, ReviewStrategy } from "../lib/api-client";
 
@@ -17,6 +17,7 @@ export function ProjectTable({
   onDelete,
   onUpdateReviewStrategy,
   onResetWebhook,
+  onConfigure,
   isAdmin = false,
   resettingProjectId = null
 }: {
@@ -25,6 +26,7 @@ export function ProjectTable({
   onDelete: (id: number) => void;
   onUpdateReviewStrategy?: (id: number, reviewStrategy: ReviewStrategy) => void;
   onResetWebhook?: (id: number) => void;
+  onConfigure?: (project: Project) => void;
   isAdmin?: boolean;
   resettingProjectId?: number | null;
 }) {
@@ -36,7 +38,23 @@ export function ProjectTable({
             <th>프로젝트</th>
             <th>MR 리뷰 브랜치</th>
             <th>커밋 리뷰</th>
-            <th>리뷰 전략</th>
+            <th>
+              <span className="table-heading-with-tooltip">
+                리뷰 전략
+                <span className="tooltip-trigger">
+                  <button type="button" className="tooltip-icon" aria-label="리뷰 전략 설명">
+                    <Info size={14} />
+                  </button>
+                  <span className="tooltip-panel" role="tooltip">
+                    <strong>리뷰 전략</strong>
+                    <span>Auto: Codex가 diff 위험도를 먼저 보고 medium/high/xhigh를 선택합니다.</span>
+                    <span>빠름: medium으로 빠르게 리뷰합니다.</span>
+                    <span>균형: high로 리뷰 품질과 시간을 균형 있게 가져갑니다.</span>
+                    <span>정밀: xhigh로 오래 걸리더라도 깊게 리뷰합니다.</span>
+                  </span>
+                </span>
+              </span>
+            </th>
             <th>Webhook</th>
             <th>상태</th>
             <th />
@@ -51,6 +69,7 @@ export function ProjectTable({
               onDelete={onDelete}
               onUpdateReviewStrategy={onUpdateReviewStrategy}
               onResetWebhook={onResetWebhook}
+              onConfigure={onConfigure}
               isAdmin={isAdmin}
               isResettingWebhook={resettingProjectId === project.id}
             />
@@ -74,6 +93,7 @@ function ProjectRow({
   onDelete,
   onUpdateReviewStrategy,
   onResetWebhook,
+  onConfigure,
   isAdmin,
   isResettingWebhook
 }: {
@@ -82,6 +102,7 @@ function ProjectRow({
   onDelete: (id: number) => void;
   onUpdateReviewStrategy?: (id: number, reviewStrategy: ReviewStrategy) => void;
   onResetWebhook?: (id: number) => void;
+  onConfigure?: (project: Project) => void;
   isAdmin: boolean;
   isResettingWebhook: boolean;
 }) {
@@ -144,7 +165,7 @@ function ProjectRow({
           projectId={project.gitlabProjectId}
           values={mrTargetBranches}
           onChange={updateMrTargetBranches}
-          placeholder="모든 opened MR"
+          placeholder="비활성화"
         />
       </td>
       <td>
@@ -178,6 +199,11 @@ function ProjectRow({
       </td>
       <td className="right">
         <div className="button-row end">
+          {onConfigure && (
+            <button className="icon-button" onClick={() => onConfigure(project)} title="리뷰 설정">
+              <Settings size={16} />
+            </button>
+          )}
           {isAdmin && onResetWebhook && (
             <button
               className="icon-button"

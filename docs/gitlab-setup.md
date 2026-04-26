@@ -105,7 +105,7 @@ Reviewer Bot Token은 다음 작업에 사용됩니다.
 - MR target branches:
   - GitLab branch 목록에서 선택하거나 직접 입력할 수 있습니다.
   - 예: `main, develop`
-  - 비워두면 opened MR 전체를 리뷰합니다.
+  - 비워두면 MR 리뷰를 실행하지 않습니다.
 - Commit review branches:
   - GitLab branch 목록에서 선택하거나 직접 입력할 수 있습니다.
   - 예: `main, develop, release/1.0`
@@ -147,7 +147,8 @@ target_branch=<branch>
 여러 사용자가 같은 shared project를 등록한 경우:
 
 - `MR target branches`는 사용자 subscription 전체를 병합합니다.
-- 하나라도 비어 있으면 opened MR 전체를 감시합니다.
+- 비어 있는 subscription은 MR 리뷰 대상 branch를 추가하지 않습니다.
+- 병합 결과가 비어 있으면 해당 shared project의 MR 리뷰는 실행하지 않습니다.
 - skip label은 전체 subscription의 union으로 적용됩니다.
 
 ## Commit 리뷰 조건

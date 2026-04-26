@@ -51,6 +51,8 @@ export default function DashboardPage() {
           <Metric label="진행 중" value={dashboard.data?.stats.runningCount ?? 0} />
           <Metric label="실패" value={dashboard.data?.stats.failedCount ?? 0} />
           <Metric label="댓글 작성됨" value={dashboard.data?.stats.commentedCount ?? 0} />
+          <Metric label="오탐 피드백" value={dashboard.data?.stats.falsePositiveCount ?? 0} />
+          <Metric label="평균 리뷰 시간" value={dashboard.data?.stats.averageReviewSeconds ?? 0} suffix="초" />
         </section>
 
         <section className="panel">
@@ -64,11 +66,11 @@ export default function DashboardPage() {
   );
 }
 
-function Metric({ label, value }: { label: string; value: number }) {
+function Metric({ label, value, suffix = "" }: { label: string; value: number; suffix?: string }) {
   return (
     <div className="metric">
       <span>{label}</span>
-      <strong>{value}</strong>
+      <strong>{value}{suffix}</strong>
     </div>
   );
 }

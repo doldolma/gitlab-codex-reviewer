@@ -132,4 +132,19 @@ describe("GitLabClient discovery helpers", () => {
 
     expect(hook.id).toBe(99);
   });
+
+  it("deletes project webhooks", async () => {
+    const fetchMock = vi.fn(async (url: URL | RequestInfo, init?: RequestInit) => {
+      const requestUrl = new URL(String(url));
+      expect(requestUrl.pathname).toBe("/api/v4/projects/123/hooks/99");
+      expect(init?.method).toBe("DELETE");
+      expect(new Headers(init?.headers).get("authorization")).toBe("Bearer access-token");
+      return new Response(null, { status: 204 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await new GitLabClient(connection).deleteProjectHook("123", 99);
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
 });
