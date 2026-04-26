@@ -104,4 +104,32 @@ describe("GitLabClient discovery helpers", () => {
 
     expect(commits[0]?.id).toBe("abc123");
   });
+
+  it("creates project webhooks with push and merge request events enabled", async () => {
+    const fetchMock = vi.fn(async (url: URL | RequestInfo, init?: RequestInit) => {
+      const requestUrl = new URL(String(url));
+      expect(requestUrl.pathname).toBe("/api/v4/projects/123/hooks");
+      expect(init?.method).toBe("POST");
+      expect(new Headers(init?.headers).get("authorization")).toBe("Bearer access-token");
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      expect(body).toMatchObject({
+        url: "https://reviewer.example.com/api/gitlab/webhook",
+        token: "hook-secret",
+        push_events: true,
+        merge_requests_events: true,
+        enable_ssl_verification: true,
+        name: "GitLab Codex Reviewer"
+      });
+      return new Response(JSON.stringify({ id: 99, url: body.url }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const hook = await new GitLabClient(connection).createProjectHook("123", {
+      url: "https://reviewer.example.com/api/gitlab/webhook",
+      token: "hook-secret",
+      name: "GitLab Codex Reviewer"
+    });
+
+    expect(hook.id).toBe(99);
+  });
 });

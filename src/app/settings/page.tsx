@@ -8,7 +8,6 @@ import {
   apiSend,
   type AdminUser,
   type AuthStatus,
-  type CodexReviewReasoningEffort,
   type CodexReviewSettings,
   type ReviewerBotStatus,
   type UserRole
@@ -27,7 +26,6 @@ export default function SettingsPage() {
   const [botToken, setBotToken] = useState("");
   const [botError, setBotError] = useState<string | null>(null);
   const [reviewModel, setReviewModel] = useState("");
-  const [reviewReasoningEffort, setReviewReasoningEffort] = useState<CodexReviewReasoningEffort>("xhigh");
   const [reviewSettingsError, setReviewSettingsError] = useState<string | null>(null);
   const [origin, setOrigin] = useState("");
   const reviewerBot = useQuery({
@@ -86,7 +84,7 @@ export default function SettingsPage() {
     mutationFn: () =>
       apiSend<CodexReviewSettings>("/api/codex/review-settings", {
         method: "PATCH",
-        body: JSON.stringify({ model: reviewModel, reasoningEffort: reviewReasoningEffort })
+        body: JSON.stringify({ model: reviewModel })
       }),
     onSuccess: () => {
       setReviewSettingsError(null);
@@ -103,8 +101,7 @@ export default function SettingsPage() {
   useEffect(() => {
     if (!reviewSettings.data) return;
     setReviewModel(reviewSettings.data.model);
-    setReviewReasoningEffort(reviewSettings.data.reasoningEffort);
-  }, [reviewSettings.data?.model, reviewSettings.data?.reasoningEffort]);
+  }, [reviewSettings.data?.model]);
 
   const adminCount = users.data?.users.filter((user) => user.role === "admin").length ?? 0;
 
@@ -150,8 +147,8 @@ export default function SettingsPage() {
               <code>{reviewSettings.data?.model ?? "gpt-5.5"}</code>
             </div>
             <div>
-              <span>Reasoning</span>
-              <code>{reviewSettings.data?.reasoningEffort ?? "xhigh"}</code>
+              <span>리뷰 전략</span>
+              <code>프로젝트별</code>
             </div>
             <div>
               <span>마지막 수정</span>
@@ -173,19 +170,6 @@ export default function SettingsPage() {
                     <option key={model} value={model} />
                   ))}
                 </datalist>
-              </label>
-              <label>
-                <span>Reasoning</span>
-                <select
-                  value={reviewReasoningEffort}
-                  onChange={(event) => setReviewReasoningEffort(event.target.value as CodexReviewReasoningEffort)}
-                >
-                  {(reviewSettings.data?.reasoningEfforts ?? ["minimal", "low", "medium", "high", "xhigh"]).map((effort) => (
-                    <option key={effort} value={effort}>
-                      {effort}
-                    </option>
-                  ))}
-                </select>
               </label>
               <div className="button-row">
                 <button

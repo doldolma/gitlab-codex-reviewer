@@ -65,9 +65,7 @@ describe("multi-user review state", () => {
     expect(project.commitBranches).toEqual(["main"]);
 
     const updated = await state.updateProject(userId, project.id, {
-      displayName: "Service",
       enabled: false,
-      skipLabels: [],
       mrTargetBranches: [],
       commitBranches: ["release/1.0"]
     });
@@ -116,6 +114,79 @@ describe("multi-user review state", () => {
     expect(groups[0]?.skipLabels.sort()).toEqual(["skip-a", "skip-b"]);
     expect(groups[0]?.mrTargetBranches.sort()).toEqual(["develop", "main"]);
     expect(groups[0]?.commitBranches.sort()).toEqual(["main", "release/1.0"]);
+    await db.$disconnect();
+  });
+
+  it("exposes webhook status from the shared GitLab project", async () => {
+    const db = await testDb();
+    const state = new ReviewStateStore(db);
+    const userId = await insertTestUser(db, { gitlabUserId: 1, username: "alice" });
+    const shared = await state.upsertGitlabProject({
+      gitlabHost: "https://gitlab.example.com",
+      gitlabProjectId: "123",
+      pathWithNamespace: "group/service",
+      nameWithNamespace: "Group / Service"
+    });
+    await state.updateGitlabProjectWebhook(shared.id, {
+      webhookHookId: 77,
+      webhookSecretEncrypted: "encrypted-secret",
+      webhookUrl: "https://reviewer.example.com/api/gitlab/webhook",
+      webhookLastVerifiedAt: "2026-04-26T00:00:00.000Z",
+      webhookError: null
+    });
+    await state.createProject(userId, {
+      gitlabProjectRefId: shared.id,
+      gitlabProjectId: "123",
+      displayName: "Service",
+      enabled: true,
+      skipLabels: []
+    });
+
+    const projects = await state.listProjects(userId);
+
+    expect(projects[0]?.webhookStatus).toBe("connected");
+    expect(projects[0]?.webhookUrl).toBe("https://reviewer.example.com/api/gitlab/webhook");
+    await db.$disconnect();
+  });
+
+  it("lets any subscribed user update the shared project review strategy", async () => {
+    const db = await testDb();
+    const state = new ReviewStateStore(db);
+    const userA = await insertTestUser(db, { gitlabUserId: 1, username: "alice" });
+    const userB = await insertTestUser(db, { gitlabUserId: 2, username: "bob" });
+    const outsider = await insertTestUser(db, { gitlabUserId: 3, username: "mallory" });
+    const shared = await state.upsertGitlabProject({
+      gitlabHost: "https://gitlab.example.com",
+      gitlabProjectId: "123",
+      pathWithNamespace: "group/service",
+      nameWithNamespace: "Group / Service"
+    });
+    const projectA = await state.createProject(userA, {
+      gitlabProjectRefId: shared.id,
+      gitlabProjectId: "123",
+      displayName: "Alice service",
+      enabled: true,
+      skipLabels: []
+    });
+    const projectB = await state.createProject(userB, {
+      gitlabProjectRefId: shared.id,
+      gitlabProjectId: "123",
+      displayName: "Bob service",
+      enabled: true,
+      skipLabels: []
+    });
+
+    expect(projectA.reviewStrategy).toBe("auto");
+    const updatedByA = await state.updateGitlabProjectReviewStrategy(userA, projectA.id, "thorough");
+    expect(updatedByA.reviewStrategy).toBe("thorough");
+    expect(updatedByA.reviewStrategyUpdatedByUserId).toBe(userA);
+    expect((await state.listProjects(userB))[0]?.reviewStrategy).toBe("thorough");
+
+    const updatedByB = await state.updateGitlabProjectReviewStrategy(userB, projectB.id, "fast");
+    expect(updatedByB.reviewStrategy).toBe("fast");
+    expect(updatedByB.reviewStrategyUpdatedByUserId).toBe(userB);
+    await expect(state.updateGitlabProjectReviewStrategy(outsider, projectA.id, "balanced")).rejects.toThrow();
+
     await db.$disconnect();
   });
 
@@ -245,6 +316,10 @@ describe("multi-user review state", () => {
       model: "gpt-5.5",
       reasoningEffort: "xhigh",
       promptVersion: "ko-workspace-review-v3",
+      reviewStrategy: null,
+      triageUsed: null,
+      triageRiskLevel: null,
+      triageReason: null,
       inputTokens: 1200,
       outputTokens: 300,
       reasoningTokens: 80,
@@ -280,7 +355,15 @@ describe("multi-user review state", () => {
       level: "info",
       step: "codex_started",
       message: "Codex review started.",
-      metadata: { model: "gpt-5.5", modelReasoningEffort: "xhigh", promptVersion: "ko-workspace-review-v3" }
+      metadata: {
+        model: "gpt-5.5",
+        modelReasoningEffort: "xhigh",
+        promptVersion: "ko-workspace-review-v3",
+        reviewStrategy: "auto",
+        triageUsed: true,
+        triageRiskLevel: "high",
+        triageReason: "스키마 변경"
+      }
     });
     await state.addReviewEvent({
       runType: "mr",
@@ -296,6 +379,10 @@ describe("multi-user review state", () => {
       model: "gpt-5.5",
       reasoningEffort: "xhigh",
       promptVersion: "ko-workspace-review-v3",
+      reviewStrategy: "auto",
+      triageUsed: true,
+      triageRiskLevel: "high",
+      triageReason: "스키마 변경",
       inputTokens: 100,
       outputTokens: 50,
       reasoningTokens: 25,
@@ -374,6 +461,37 @@ describe("multi-user review state", () => {
     await db.$disconnect();
   });
 
+  it("recovers stale running review jobs and queues them again", async () => {
+    const db = await testDb();
+    const state = new ReviewStateStore(db);
+    const userId = await insertTestUser(db, { gitlabUserId: 1, username: "alice" });
+    const runId = await state.startCommitRun(userId, null, "group/service", "main", { id: "abc123", title: "Fix bug" }, "manual", "queued");
+    const job = await state.createReviewJob({
+      kind: "commit_manual",
+      userId,
+      runType: "commit",
+      runId,
+      payload: { commitSha: "abc123" }
+    });
+    const claimed = await state.claimNextReviewJob();
+    expect(claimed?.id).toBe(job.id);
+    await db.reviewJob.update({
+      where: { id: job.id },
+      data: { updatedAt: new Date(Date.now() - 10 * 60_000).toISOString() }
+    });
+
+    const recovered = await state.recoverStaleRunningJobs(2 * 60_000);
+
+    expect(recovered).toBe(1);
+    const recoveredJob = await db.reviewJob.findUnique({ where: { id: job.id } });
+    expect(recoveredJob?.status).toBe("queued");
+    const recoveredRun = await state.getCommitRunById(userId, runId);
+    expect(recoveredRun?.status).toBe("queued");
+    const events = await state.listReviewEvents(userId, "commit", runId);
+    expect(events.some((event) => event.step === "job_recovered")).toBe(true);
+    await db.$disconnect();
+  });
+
   it("clears only review history data", async () => {
     const db = await testDb();
     const state = new ReviewStateStore(db);
@@ -397,6 +515,7 @@ describe("multi-user review state", () => {
     const runId = await state.startRun(project.id, 7, "abc123", "queued");
     await state.addReviewEvent({ runType: "mr", runId, level: "info", step: "run_queued", message: "Queued." });
     await state.createReviewJob({ kind: "mr_retry", userId, runType: "mr", runId, payload: { runId } });
+    await state.createReviewJob({ kind: "commit_webhook", userId, runType: "commit", runId: null, payload: { commitSha: "abc123" } });
 
     await state.clearReviewHistory();
 

@@ -3,7 +3,8 @@ import { nowIso } from "./prisma";
 import type { UserRole } from "./roles";
 
 export const DEFAULT_CODEX_REVIEW_MODEL = "gpt-5.5";
-export const DEFAULT_CODEX_REVIEW_REASONING_EFFORT = "xhigh";
+export const DEFAULT_CODEX_REVIEW_REASONING_EFFORT = "high";
+export const TRIAGE_CODEX_REVIEW_REASONING_EFFORT = "medium";
 export const CODEX_REVIEW_MODEL_PRESETS = ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex"] as const;
 export const CODEX_REVIEW_REASONING_EFFORTS = ["minimal", "low", "medium", "high", "xhigh"] as const;
 
@@ -14,13 +15,17 @@ export type CodexReviewRuntimeSettings = {
   reasoningEffort: CodexReviewReasoningEffort;
 };
 
-export type CodexReviewSettingsView = CodexReviewRuntimeSettings & {
+export type CodexReviewModelSettings = {
+  model: string;
+};
+
+export type CodexReviewSettingsView = CodexReviewModelSettings & {
   isDefault: boolean;
   updatedByUserId: number | null;
   updatedAt: string | null;
-  defaults: CodexReviewRuntimeSettings;
+  defaults: CodexReviewModelSettings;
   modelPresets: string[];
-  reasoningEfforts: CodexReviewReasoningEffort[];
+  strategyMode: "project";
 };
 
 export class CodexReviewSettingsError extends Error {}
@@ -31,11 +36,10 @@ export class CodexReviewSettingsService {
 
   async getEffectiveReviewSettings(): Promise<CodexReviewSettingsView> {
     const row = await this.db.codexReviewSettings.findUnique({ where: { id: 1 } });
-    if (!row) return settingsView(defaultRuntimeSettings(), true, null, null);
+    if (!row) return settingsView(defaultModelSettings(), true, null, null);
     return settingsView(
       {
-        model: row.model,
-        reasoningEffort: parseReasoningEffort(row.reasoningEffort)
+        model: row.model
       },
       false,
       row.updatedByUserId,
@@ -45,7 +49,7 @@ export class CodexReviewSettingsService {
 
   async updateReviewSettings(
     user: { id: number; role: UserRole },
-    input: { model: string; reasoningEffort: string }
+    input: { model: string }
   ): Promise<CodexReviewSettingsView> {
     if (user.role !== "admin") {
       throw new CodexReviewSettingsPermissionError("Admin role required");
@@ -58,21 +62,20 @@ export class CodexReviewSettingsService {
       create: {
         id: 1,
         model: settings.model,
-        reasoningEffort: settings.reasoningEffort,
+        reasoningEffort: DEFAULT_CODEX_REVIEW_REASONING_EFFORT,
         updatedByUserId: user.id,
         createdAt: timestamp,
         updatedAt: timestamp
       },
       update: {
         model: settings.model,
-        reasoningEffort: settings.reasoningEffort,
         updatedByUserId: user.id,
         updatedAt: timestamp
       }
     });
 
     return settingsView(
-      { model: row.model, reasoningEffort: parseReasoningEffort(row.reasoningEffort) },
+      { model: row.model },
       false,
       row.updatedByUserId,
       row.updatedAt
@@ -87,18 +90,25 @@ export function defaultRuntimeSettings(): CodexReviewRuntimeSettings {
   };
 }
 
-export function validateReviewSettings(input: { model: string; reasoningEffort: string }): CodexReviewRuntimeSettings {
+export function defaultModelSettings(): CodexReviewModelSettings {
+  return {
+    model: DEFAULT_CODEX_REVIEW_MODEL
+  };
+}
+
+export function runtimeSettings(model: string, reasoningEffort: CodexReviewReasoningEffort): CodexReviewRuntimeSettings {
+  return { model, reasoningEffort };
+}
+
+export function validateReviewSettings(input: { model: string }): CodexReviewModelSettings {
   const model = input.model.trim();
   if (!model || /\s/.test(model)) {
     throw new CodexReviewSettingsError("Model must be a non-empty value without whitespace");
   }
-  return {
-    model,
-    reasoningEffort: parseReasoningEffort(input.reasoningEffort)
-  };
+  return { model };
 }
 
-function parseReasoningEffort(value: string): CodexReviewReasoningEffort {
+export function parseReasoningEffort(value: string): CodexReviewReasoningEffort {
   if (CODEX_REVIEW_REASONING_EFFORTS.includes(value as CodexReviewReasoningEffort)) {
     return value as CodexReviewReasoningEffort;
   }
@@ -106,7 +116,7 @@ function parseReasoningEffort(value: string): CodexReviewReasoningEffort {
 }
 
 function settingsView(
-  settings: CodexReviewRuntimeSettings,
+  settings: CodexReviewModelSettings,
   isDefault: boolean,
   updatedByUserId: number | null,
   updatedAt: string | null
@@ -116,8 +126,8 @@ function settingsView(
     isDefault,
     updatedByUserId,
     updatedAt,
-    defaults: defaultRuntimeSettings(),
+    defaults: defaultModelSettings(),
     modelPresets: [...CODEX_REVIEW_MODEL_PRESETS],
-    reasoningEfforts: [...CODEX_REVIEW_REASONING_EFFORTS]
+    strategyMode: "project"
   };
 }

@@ -1,38 +1,59 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { Save, Trash2 } from "lucide-react";
+import { useEffect, useState } from "react";
+import { ExternalLink, RefreshCw, Trash2 } from "lucide-react";
 import { BranchMultiCombobox } from "./gitlab-combobox";
-import type { Project } from "../lib/api-client";
+import type { Project, ReviewStrategy } from "../lib/api-client";
 
-type ProjectUpdatePayload = Omit<Project, "id" | "gitlabProjectRefId" | "gitlabProjectId">;
+type ProjectUpdatePayload = {
+  enabled: boolean;
+  mrTargetBranches: string[];
+  commitBranches: string[];
+};
 
 export function ProjectTable({
   projects,
   onUpdate,
-  onDelete
+  onDelete,
+  onUpdateReviewStrategy,
+  onResetWebhook,
+  isAdmin = false,
+  resettingProjectId = null
 }: {
   projects: Project[];
   onUpdate: (id: number, payload: ProjectUpdatePayload) => void;
   onDelete: (id: number) => void;
+  onUpdateReviewStrategy?: (id: number, reviewStrategy: ReviewStrategy) => void;
+  onResetWebhook?: (id: number) => void;
+  isAdmin?: boolean;
+  resettingProjectId?: number | null;
 }) {
   return (
-    <div className="table-wrap">
-      <table>
+    <div className="table-wrap project-table-wrap">
+      <table className="project-settings-table">
         <thead>
           <tr>
             <th>프로젝트</th>
-            <th>GitLab ID / Path</th>
-            <th>건너뛸 Labels</th>
-            <th>MR 대상</th>
-            <th>커밋 브랜치</th>
+            <th>MR 리뷰 브랜치</th>
+            <th>커밋 리뷰</th>
+            <th>리뷰 전략</th>
+            <th>Webhook</th>
             <th>상태</th>
             <th />
           </tr>
         </thead>
         <tbody>
           {projects.map((project) => (
-            <ProjectRow key={project.id} project={project} onUpdate={onUpdate} onDelete={onDelete} />
+            <ProjectRow
+              key={project.id}
+              project={project}
+              onUpdate={onUpdate}
+              onDelete={onDelete}
+              onUpdateReviewStrategy={onUpdateReviewStrategy}
+              onResetWebhook={onResetWebhook}
+              isAdmin={isAdmin}
+              isResettingWebhook={resettingProjectId === project.id}
+            />
           ))}
           {!projects.length && (
             <tr>
@@ -50,58 +71,79 @@ export function ProjectTable({
 function ProjectRow({
   project,
   onUpdate,
-  onDelete
+  onDelete,
+  onUpdateReviewStrategy,
+  onResetWebhook,
+  isAdmin,
+  isResettingWebhook
 }: {
   project: Project;
   onUpdate: (id: number, payload: ProjectUpdatePayload) => void;
   onDelete: (id: number) => void;
+  onUpdateReviewStrategy?: (id: number, reviewStrategy: ReviewStrategy) => void;
+  onResetWebhook?: (id: number) => void;
+  isAdmin: boolean;
+  isResettingWebhook: boolean;
 }) {
-  const [displayName, setDisplayName] = useState(project.displayName);
-  const [skipLabels, setSkipLabels] = useState(project.skipLabels.join(", "));
   const [mrTargetBranches, setMrTargetBranches] = useState<string[]>(project.mrTargetBranches);
   const [commitBranches, setCommitBranches] = useState<string[]>(project.commitBranches);
   const [enabled, setEnabled] = useState(project.enabled);
 
   useEffect(() => {
-    setDisplayName(project.displayName);
-    setSkipLabels(project.skipLabels.join(", "));
     setMrTargetBranches(project.mrTargetBranches);
     setCommitBranches(project.commitBranches);
     setEnabled(project.enabled);
   }, [project]);
 
-  const payload = useMemo<ProjectUpdatePayload>(
-    () => ({
-      displayName,
+  function updateProject(next: Partial<ProjectUpdatePayload>) {
+    onUpdate(project.id, {
       enabled,
-      skipLabels: splitCsv(skipLabels),
       mrTargetBranches,
-      commitBranches
-    }),
-    [commitBranches, displayName, enabled, mrTargetBranches, skipLabels]
-  );
+      commitBranches,
+      ...next
+    });
+  }
 
-  const isDirty =
-    payload.displayName !== project.displayName ||
-    payload.enabled !== project.enabled ||
-    payload.skipLabels.join(",") !== project.skipLabels.join(",") ||
-    payload.mrTargetBranches.join(",") !== project.mrTargetBranches.join(",") ||
-    payload.commitBranches.join(",") !== project.commitBranches.join(",");
+  function updateMrTargetBranches(nextBranches: string[]) {
+    setMrTargetBranches(nextBranches);
+    updateProject({ mrTargetBranches: nextBranches });
+  }
+
+  function updateCommitBranches(nextBranches: string[]) {
+    setCommitBranches(nextBranches);
+    updateProject({ commitBranches: nextBranches });
+  }
+
+  function toggleEnabled() {
+    const nextEnabled = !enabled;
+    setEnabled(nextEnabled);
+    updateProject({ enabled: nextEnabled });
+  }
 
   return (
     <tr>
       <td>
-        <input className="compact-input" value={displayName} onChange={(event) => setDisplayName(event.target.value)} />
-      </td>
-      <td className="mono">{project.gitlabProjectId}</td>
-      <td>
-        <input className="compact-input" value={skipLabels} onChange={(event) => setSkipLabels(event.target.value)} />
+        <div className="project-cell">
+          {project.webUrl ? (
+            <a className="icon-button project-home-link" href={project.webUrl} target="_blank" rel="noreferrer" title="GitLab 프로젝트 열기">
+              <ExternalLink size={16} />
+            </a>
+          ) : (
+            <span className="icon-button project-home-link disabled" aria-hidden="true">
+              <ExternalLink size={16} />
+            </span>
+          )}
+          <div>
+            <strong>{project.displayName}</strong>
+            <small>{project.webUrl ?? "GitLab URL 없음"}</small>
+          </div>
+        </div>
       </td>
       <td>
         <BranchMultiCombobox
           projectId={project.gitlabProjectId}
           values={mrTargetBranches}
-          onChange={setMrTargetBranches}
+          onChange={updateMrTargetBranches}
           placeholder="모든 opened MR"
         />
       </td>
@@ -109,20 +151,43 @@ function ProjectRow({
         <BranchMultiCombobox
           projectId={project.gitlabProjectId}
           values={commitBranches}
-          onChange={setCommitBranches}
+          onChange={updateCommitBranches}
           placeholder="비활성화"
         />
       </td>
       <td>
-        <button className={enabled ? "status ok status-button" : "status muted status-button"} onClick={() => setEnabled(!enabled)}>
+        <select
+          className="compact-input strategy-select"
+          value={project.reviewStrategy}
+          onChange={(event) => onUpdateReviewStrategy?.(project.id, event.target.value as ReviewStrategy)}
+          title={project.reviewStrategyUpdatedAt ? `마지막 변경: ${new Date(project.reviewStrategyUpdatedAt).toLocaleString()}` : "리뷰 전략"}
+        >
+          <option value="auto">Auto</option>
+          <option value="fast">빠름</option>
+          <option value="balanced">균형</option>
+          <option value="thorough">정밀</option>
+        </select>
+      </td>
+      <td>
+        <WebhookStatus project={project} />
+      </td>
+      <td>
+        <button className={enabled ? "status ok status-button" : "status muted status-button"} onClick={toggleEnabled}>
           {enabled ? "활성" : "일시정지"}
         </button>
       </td>
       <td className="right">
         <div className="button-row end">
-          <button className="icon-button" onClick={() => onUpdate(project.id, payload)} disabled={!isDirty} title="프로젝트 저장">
-            <Save size={16} />
-          </button>
+          {isAdmin && onResetWebhook && (
+            <button
+              className="icon-button"
+              onClick={() => onResetWebhook(project.id)}
+              disabled={isResettingWebhook}
+              title="Webhook 재설정"
+            >
+              <RefreshCw size={16} />
+            </button>
+          )}
           <button className="icon-button danger" onClick={() => onDelete(project.id)} title="프로젝트 삭제">
             <Trash2 size={16} />
           </button>
@@ -132,6 +197,23 @@ function ProjectRow({
   );
 }
 
-function splitCsv(value: string): string[] {
-  return value.split(",").map((part) => part.trim()).filter(Boolean);
+function WebhookStatus({ project }: { project: Project }) {
+  const label =
+    project.webhookStatus === "connected" ? "연결됨" : project.webhookStatus === "error" ? "생성 실패" : "미설정";
+  const className =
+    project.webhookStatus === "connected"
+      ? "status ok"
+      : project.webhookStatus === "error"
+        ? "status bad"
+        : "status muted";
+
+  return (
+    <div className="webhook-status">
+      <span className={className}>{label}</span>
+      {project.webhookError && <small title={project.webhookError}>{project.webhookError}</small>}
+      {!project.webhookError && project.webhookLastVerifiedAt && (
+        <small>{new Date(project.webhookLastVerifiedAt).toLocaleString()}</small>
+      )}
+    </div>
+  );
 }

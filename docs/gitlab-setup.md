@@ -71,6 +71,7 @@ PUBLIC_BASE_URL=https://reviewer.example.com
 
 - Bot 계정을 리뷰 대상 group/project에 `Developer` 이상으로 추가합니다.
 - PAT scope는 `api`와 `read_repository`를 부여합니다.
+- Webhook 자동 생성까지 사용하려면 대상 project에서 `Maintainer` 이상 권한이 필요합니다.
 - 전역 admin 권한은 권장하지 않습니다. 가능하면 필요한 group/project에만 멤버로 추가합니다.
 
 앱에서 등록:
@@ -87,6 +88,7 @@ Reviewer Bot Token은 다음 작업에 사용됩니다.
 - opened MR 조회
 - MR diff 조회
 - branch/commit/compare 조회
+- project webhook 생성/갱신
 - repository clone/fetch/detached checkout
 - MR note 작성
 - commit comment 작성
@@ -97,13 +99,9 @@ Reviewer Bot Token은 다음 작업에 사용됩니다.
 
 입력값:
 
-- Display name: UI에서 볼 이름
 - GitLab project:
   - 현재 로그인 사용자의 GitLab token으로 접근 가능한 project를 검색해서 선택합니다.
   - 저장값은 안정적인 numeric project id입니다.
-- Skip labels:
-  - 쉼표로 구분
-  - 기본 예: `skip-codex-review`
 - MR target branches:
   - GitLab branch 목록에서 선택하거나 직접 입력할 수 있습니다.
   - 예: `main, develop`
@@ -113,7 +111,16 @@ Reviewer Bot Token은 다음 작업에 사용됩니다.
   - 예: `main, develop, release/1.0`
   - 비워두면 commit 자동 리뷰는 실행하지 않습니다.
 
-worker는 enabled subscription을 shared GitLab project 기준으로 묶어서 조회합니다. 같은 project를 여러 사용자가 등록해도 GitLab polling, workspace checkout, Codex 리뷰, 댓글 작성은 project당 한 번만 수행됩니다.
+project 등록 시 앱은 Reviewer Bot Token으로 `${PUBLIC_BASE_URL}/api/gitlab/webhook` Project Webhook 생성을 시도합니다. 같은 GitLab project를 여러 사용자가 등록해도 shared project당 hook은 하나만 유지합니다. webhook 생성에 실패해도 project 등록은 성공하며, Projects 화면의 Webhook 상태와 `webhookError`로 원인을 확인할 수 있습니다.
+
+Webhook 생성 조건:
+
+- `PUBLIC_BASE_URL`이 GitLab 서버에서 접근 가능해야 합니다.
+- 운영에서는 HTTPS를 권장합니다.
+- Reviewer Bot 계정이 대상 project에서 `Maintainer` 이상이어야 합니다.
+- PAT scope에 `api`가 있어야 합니다.
+
+worker는 enabled subscription을 shared GitLab project 기준으로 묶어서 조회합니다. 같은 project를 여러 사용자가 등록해도 GitLab webhook 처리, fallback polling, workspace checkout, Codex 리뷰, 댓글 작성은 project당 한 번만 수행됩니다.
 
 ## MR 조회 조건
 
@@ -150,7 +157,7 @@ target_branch=<branch>
 - 첫 scan은 branch의 최신 SHA를 baseline으로 저장하고 리뷰하지 않습니다.
 - 이후 branch 최신 SHA가 바뀌면 compare API로 새 commit 목록을 가져옵니다.
 - 오래된 commit부터 diff와 workspace context 기반 리뷰를 실행합니다.
-- finding이 있으면 GitLab commit comment를 작성합니다.
-- finding이 없으면 DB에 `no_findings`만 기록하고 댓글은 남기지 않습니다.
+- 리뷰가 완료되면 GitLab commit comment에 요약을 작성합니다.
+- actionable finding이 없으면 `no_findings`로 기록하고 “액션 필요한 이슈 없음” 요약 댓글을 남깁니다.
 
 테스트용으로 `Commit Reviews` 화면에서 GitLab project와 branch를 선택한 뒤 최신 commit 목록에서 commit을 고르면 감시 project가 아니어도 수동 commit review를 실행할 수 있습니다. 이때도 GitLab 조회와 댓글 작성은 Reviewer Bot Token으로 수행됩니다.

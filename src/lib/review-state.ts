@@ -2,6 +2,7 @@ import type { BranchWatchState, CommitReviewRun, GitlabProject, MergeRequest, Pr
 import type { Db } from "./prisma";
 import { nowIso } from "./prisma";
 import type { GitLabCommit, GitLabMergeRequest } from "./gitlab-client";
+import { parseReviewStrategy, type ReviewStrategy } from "./review-strategy";
 
 export type ProjectRow = {
   id: number;
@@ -9,10 +10,18 @@ export type ProjectRow = {
   gitlabProjectRefId: number | null;
   gitlabProjectId: string;
   displayName: string;
+  webUrl: string | null;
   enabled: boolean;
   skipLabels: string[];
   mrTargetBranches: string[];
   commitBranches: string[];
+  reviewStrategy: ReviewStrategy;
+  reviewStrategyUpdatedByUserId: number | null;
+  reviewStrategyUpdatedAt: string | null;
+  webhookStatus: "connected" | "error" | "missing";
+  webhookUrl: string | null;
+  webhookLastVerifiedAt: string | null;
+  webhookError: string | null;
 };
 
 export type GitlabProjectRow = {
@@ -25,6 +34,14 @@ export type GitlabProjectRow = {
   cloneHttpUrl: string | null;
   defaultBranch: string | null;
   workspaceError: string | null;
+  webhookHookId: number | null;
+  webhookSecretEncrypted: string | null;
+  webhookUrl: string | null;
+  webhookLastVerifiedAt: string | null;
+  webhookError: string | null;
+  reviewStrategy: ReviewStrategy;
+  reviewStrategyUpdatedByUserId: number | null;
+  reviewStrategyUpdatedAt: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -118,13 +135,17 @@ export type CommitReviewRunView = {
 
 export type ReviewRunType = "mr" | "commit";
 export type ReviewEventLevel = "info" | "warn" | "error";
-export type ReviewJobKind = "commit_manual" | "commit_retry" | "mr_retry" | "scan_user";
+export type ReviewJobKind = "commit_manual" | "commit_retry" | "mr_retry" | "scan_user" | "commit_webhook" | "mr_webhook";
 export type ReviewJobStatus = "queued" | "running" | "completed" | "failed";
 
 export type ReviewMeta = {
   model: string | null;
   reasoningEffort: string | null;
   promptVersion: string | null;
+  reviewStrategy: string | null;
+  triageUsed: boolean | null;
+  triageRiskLevel: string | null;
+  triageReason: string | null;
   inputTokens: number | null;
   outputTokens: number | null;
   reasoningTokens: number | null;
@@ -167,6 +188,7 @@ export class ReviewStateStore {
         userId,
         ...(enabledOnly ? { enabled: true } : {})
       },
+      include: { gitlabProject: true },
       orderBy: { displayName: "asc" }
     });
     return rows.map(projectFromRow);
@@ -205,14 +227,13 @@ export class ReviewStateStore {
   async updateProject(
     userId: number,
     id: number,
-    input: { displayName: string; skipLabels: string[]; enabled: boolean; mrTargetBranches?: string[]; commitBranches?: string[] }
+    input: { enabled: boolean; mrTargetBranches?: string[]; commitBranches?: string[] }
   ): Promise<ProjectRow> {
     const result = await this.db.project.updateMany({
       where: { id, userId },
       data: {
-        displayName: input.displayName,
         enabled: input.enabled,
-        skipLabelsJson: JSON.stringify(input.skipLabels),
+        skipLabelsJson: JSON.stringify([]),
         mrTargetBranchesJson: JSON.stringify(input.mrTargetBranches ?? []),
         commitBranchesJson: JSON.stringify(input.commitBranches ?? []),
         updatedAt: nowIso()
@@ -262,6 +283,63 @@ export class ReviewStateStore {
     return gitlabProjectFromRow(row);
   }
 
+  async updateGitlabProjectWebhook(
+    gitlabProjectRefId: number,
+    input: {
+      webhookHookId?: number | null;
+      webhookSecretEncrypted?: string | null;
+      webhookUrl?: string | null;
+      webhookLastVerifiedAt?: string | null;
+      webhookError?: string | null;
+    }
+  ): Promise<GitlabProjectRow> {
+    const row = await this.db.gitlabProject.update({
+      where: { id: gitlabProjectRefId },
+      data: {
+        webhookHookId: input.webhookHookId,
+        webhookSecretEncrypted: input.webhookSecretEncrypted,
+        webhookUrl: input.webhookUrl,
+        webhookLastVerifiedAt: input.webhookLastVerifiedAt,
+        webhookError: input.webhookError,
+        updatedAt: nowIso()
+      }
+    });
+    return gitlabProjectFromRow(row);
+  }
+
+  async updateGitlabProjectReviewStrategy(userId: number, projectId: number, reviewStrategy: ReviewStrategy): Promise<ProjectRow> {
+    const project = await this.db.project.findFirst({
+      where: { id: projectId, userId },
+      include: { gitlabProject: true }
+    });
+    if (!project) throw new Error("Project not found");
+    if (!project.gitlabProjectRefId) throw new Error("Shared GitLab project is not linked");
+
+    const timestamp = nowIso();
+    await this.db.gitlabProject.update({
+      where: { id: project.gitlabProjectRefId },
+      data: {
+        reviewStrategy,
+        reviewStrategyUpdatedByUserId: userId,
+        reviewStrategyUpdatedAt: timestamp,
+        updatedAt: timestamp
+      }
+    });
+    return this.getProject(userId, projectId);
+  }
+
+  async getGitlabProjectByGitlabId(gitlabHost: string, gitlabProjectId: string): Promise<GitlabProjectRow | null> {
+    const row = await this.db.gitlabProject.findUnique({
+      where: {
+        gitlabHost_gitlabProjectId: {
+          gitlabHost,
+          gitlabProjectId
+        }
+      }
+    });
+    return row ? gitlabProjectFromRow(row) : null;
+  }
+
   async updateGitlabProjectWorkspaceError(gitlabProjectRefId: number, error: string | null): Promise<void> {
     await this.db.gitlabProject.update({
       where: { id: gitlabProjectRefId },
@@ -278,18 +356,23 @@ export class ReviewStateStore {
     return gitlabProjectFromRow(row);
   }
 
+  async getSharedProjectGroup(gitlabProjectRefId: number): Promise<SharedProjectGroup | null> {
+    const groups = await this.listSharedProjectGroups();
+    return groups.find((group) => group.gitlabProject.id === gitlabProjectRefId) ?? null;
+  }
+
   async deleteProject(userId: number, id: number): Promise<void> {
     await this.db.project.deleteMany({ where: { id, userId } });
   }
 
   async getProject(userId: number, id: number): Promise<ProjectRow> {
-    const row = await this.db.project.findFirst({ where: { id, userId } });
+    const row = await this.db.project.findFirst({ where: { id, userId }, include: { gitlabProject: true } });
     if (!row) throw new Error("Project not found");
     return projectFromRow(row);
   }
 
   async findProjectByGitlabId(userId: number, gitlabProjectId: string): Promise<ProjectRow | null> {
-    const row = await this.db.project.findFirst({ where: { userId, gitlabProjectId } });
+    const row = await this.db.project.findFirst({ where: { userId, gitlabProjectId }, include: { gitlabProject: true } });
     return row ? projectFromRow(row) : null;
   }
 
@@ -414,6 +497,14 @@ export class ReviewStateStore {
       select: { id: true }
     });
     return Boolean(row);
+  }
+
+  async findSharedRun(gitlabProjectRefId: number, mrIid: number, headSha: string): Promise<ReviewRunRow | null> {
+    const row = await this.db.reviewRun.findFirst({
+      where: { gitlabProjectRefId, mrIid, headSha },
+      include: { project: true }
+    });
+    return row ? reviewRunFromRow(row, row.project) : null;
   }
 
   async getRunForSha(projectId: number, mrIid: number, headSha: string): Promise<ReviewRunRow | null> {
@@ -648,6 +739,14 @@ export class ReviewStateStore {
       select: { id: true }
     });
     return Boolean(row);
+  }
+
+  async findSharedCommitRun(gitlabProjectRefId: number, commitSha: string): Promise<CommitReviewRunView | null> {
+    const row = await this.db.commitReviewRun.findFirst({
+      where: { gitlabProjectRefId, commitSha },
+      include: { project: true }
+    });
+    return row ? commitReviewRunFromRow(row, row.project) : null;
   }
 
   async getCommitRunById(userId: number, id: number): Promise<CommitReviewRunView | null> {
@@ -886,7 +985,7 @@ export class ReviewStateStore {
   async claimNextReviewJob(): Promise<ReviewJobView | null> {
     for (let attempt = 0; attempt < 5; attempt += 1) {
       const next = await this.db.reviewJob.findFirst({
-        where: { status: "queued" },
+        where: { status: "queued", updatedAt: { lte: nowIso() } },
         orderBy: [{ updatedAt: "asc" }, { id: "asc" }]
       });
       if (!next) return null;
@@ -908,6 +1007,108 @@ export class ReviewStateStore {
       return claimed ? reviewJobFromRow(claimed) : null;
     }
     return null;
+  }
+
+  async heartbeatReviewJob(id: number): Promise<void> {
+    await this.db.reviewJob.updateMany({
+      where: { id, status: "running" },
+      data: { updatedAt: nowIso() }
+    });
+  }
+
+  async recoverStaleRunningJobs(staleMs: number): Promise<number> {
+    const cutoff = new Date(Date.now() - staleMs).toISOString();
+    const rows = await this.db.reviewJob.findMany({
+      where: {
+        status: "running",
+        updatedAt: { lt: cutoff }
+      },
+      orderBy: { updatedAt: "asc" }
+    });
+
+    for (const row of rows) {
+      const timestamp = nowIso();
+      await this.db.reviewJob.updateMany({
+        where: { id: row.id, status: "running" },
+        data: {
+          status: "queued",
+          updatedAt: timestamp,
+          startedAt: null,
+          errorMessage: "Recovered stale running job after worker restart or heartbeat timeout"
+        }
+      });
+      await this.releaseLocksForRecoveredJob(row, cutoff);
+
+      if (row.runType === "commit" && row.runId) {
+        await this.db.commitReviewRun.updateMany({
+          where: { id: row.runId, status: "running" },
+          data: {
+            status: "queued",
+            finishedAt: null,
+            errorMessage: null
+          }
+        });
+      }
+      if (row.runType === "mr" && row.runId) {
+        await this.db.reviewRun.updateMany({
+          where: { id: row.runId, status: "running" },
+          data: {
+            status: "queued",
+            finishedAt: null,
+            errorMessage: null
+          }
+        });
+      }
+      if ((row.runType === "commit" || row.runType === "mr") && row.runId) {
+        await this.addReviewEvent({
+          runType: row.runType,
+          runId: row.runId,
+          level: "warn",
+          step: "job_recovered",
+          message: "Worker recovered a stale running review job and queued it again.",
+          metadata: {
+            jobId: row.id,
+            kind: row.kind,
+            previousUpdatedAt: row.updatedAt,
+            staleSeconds: Math.round(staleMs / 1000)
+          }
+        });
+      }
+    }
+
+    return rows.length;
+  }
+
+  private async releaseLocksForRecoveredJob(job: ReviewJob, staleCutoff: string): Promise<void> {
+    const payload = parseJsonRecord(job.payloadJson);
+    const gitlabProjectRefId = numberFromMetadata(payload, "gitlabProjectRefId");
+    const gitlabProjectId = stringFromMetadata(payload, "gitlabProjectId");
+    const commitSha = stringFromMetadata(payload, "commitSha");
+    const mrIid = numberFromMetadata(payload, "mrIid");
+    const headSha = stringFromMetadata(payload, "headSha");
+    const lockKeys: string[] = [];
+
+    if (gitlabProjectRefId) {
+      const project = await this.db.gitlabProject.findUnique({ where: { id: gitlabProjectRefId } });
+      if (project) {
+        lockKeys.push(`project:${project.gitlabHost}:${project.gitlabProjectId}`);
+        if (job.runType === "commit" && commitSha) lockKeys.push(`commit:${project.id}:${commitSha}`);
+        if (job.runType === "mr" && mrIid && headSha) lockKeys.push(`mr:${project.id}:${mrIid}:${headSha}`);
+      }
+    } else if (job.runType === "commit" && gitlabProjectId && commitSha) {
+      lockKeys.push(`commit:${job.userId}:${gitlabProjectId}:${commitSha}`);
+    } else if (job.runType === "mr" && job.runId) {
+      const run = await this.db.reviewRun.findUnique({ where: { id: job.runId } });
+      if (run) lockKeys.push(`${run.projectId}:${run.mrIid}:${run.headSha}`);
+    }
+
+    if (!lockKeys.length) return;
+    await this.db.reviewLock.deleteMany({
+      where: {
+        lockKey: { in: lockKeys },
+        acquiredAt: { lt: staleCutoff }
+      }
+    });
   }
 
   async completeReviewJob(id: number): Promise<void> {
@@ -936,12 +1137,12 @@ export class ReviewStateStore {
     });
   }
 
-  async requeueReviewJob(id: number, reason: string | null = null): Promise<void> {
+  async requeueReviewJob(id: number, reason: string | null = null, delayMs = 10_000): Promise<void> {
     await this.db.reviewJob.update({
       where: { id },
       data: {
         status: "queued",
-        updatedAt: nowIso(),
+        updatedAt: new Date(Date.now() + delayMs).toISOString(),
         startedAt: null,
         errorMessage: reason
       }
@@ -1152,6 +1353,10 @@ export class ReviewStateStore {
         current.model = stringFromMetadata(metadata, "model");
         current.reasoningEffort = stringFromMetadata(metadata, "modelReasoningEffort");
         current.promptVersion = stringFromMetadata(metadata, "promptVersion");
+        current.reviewStrategy = stringFromMetadata(metadata, "reviewStrategy");
+        current.triageUsed = booleanFromMetadata(metadata, "triageUsed");
+        current.triageRiskLevel = stringFromMetadata(metadata, "triageRiskLevel");
+        current.triageReason = stringFromMetadata(metadata, "triageReason");
       }
       if (row.step === "codex_usage") {
         current.inputTokens = numberFromMetadata(metadata, "inputTokens") ?? numberFromMetadata(metadata, "input_tokens");
@@ -1168,17 +1373,26 @@ export class ReviewStateStore {
   }
 }
 
-function projectFromRow(row: Project): ProjectRow {
+function projectFromRow(row: Project & { gitlabProject?: GitlabProject | null }): ProjectRow {
+  const gitlabProject = "gitlabProject" in row ? row.gitlabProject : null;
   return {
     id: row.id,
     userId: row.userId,
     gitlabProjectRefId: row.gitlabProjectRefId,
     gitlabProjectId: row.gitlabProjectId,
     displayName: row.displayName,
+    webUrl: gitlabProject?.webUrl ?? null,
     enabled: row.enabled,
     skipLabels: parseJsonArray(row.skipLabelsJson),
     mrTargetBranches: parseJsonArray(row.mrTargetBranchesJson),
-    commitBranches: parseJsonArray(row.commitBranchesJson)
+    commitBranches: parseJsonArray(row.commitBranchesJson),
+    reviewStrategy: parseReviewStrategy(gitlabProject?.reviewStrategy),
+    reviewStrategyUpdatedByUserId: gitlabProject?.reviewStrategyUpdatedByUserId ?? null,
+    reviewStrategyUpdatedAt: gitlabProject?.reviewStrategyUpdatedAt ?? null,
+    webhookStatus: webhookStatus(gitlabProject ?? null),
+    webhookUrl: gitlabProject?.webhookUrl ?? null,
+    webhookLastVerifiedAt: gitlabProject?.webhookLastVerifiedAt ?? null,
+    webhookError: gitlabProject?.webhookError ?? null
   };
 }
 
@@ -1193,9 +1407,24 @@ function gitlabProjectFromRow(row: GitlabProject): GitlabProjectRow {
     cloneHttpUrl: row.cloneHttpUrl,
     defaultBranch: row.defaultBranch,
     workspaceError: row.workspaceError,
+    webhookHookId: row.webhookHookId,
+    webhookSecretEncrypted: row.webhookSecretEncrypted,
+    webhookUrl: row.webhookUrl,
+    webhookLastVerifiedAt: row.webhookLastVerifiedAt,
+    webhookError: row.webhookError,
+    reviewStrategy: parseReviewStrategy(row.reviewStrategy),
+    reviewStrategyUpdatedByUserId: row.reviewStrategyUpdatedByUserId,
+    reviewStrategyUpdatedAt: row.reviewStrategyUpdatedAt,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt
   };
+}
+
+function webhookStatus(project: GitlabProject | null): ProjectRow["webhookStatus"] {
+  if (!project) return "missing";
+  if (project.webhookError) return "error";
+  if (project.webhookHookId && project.webhookSecretEncrypted) return "connected";
+  return "missing";
 }
 
 function branchWatchStateFromRow(row: BranchWatchState): BranchWatchStateRow {
@@ -1317,7 +1546,14 @@ function reviewJobFromRow(row: ReviewJob): ReviewJobView {
 }
 
 function isReviewJobKind(value: string): value is ReviewJobKind {
-  return value === "commit_manual" || value === "commit_retry" || value === "mr_retry" || value === "scan_user";
+  return (
+    value === "commit_manual" ||
+    value === "commit_retry" ||
+    value === "mr_retry" ||
+    value === "scan_user" ||
+    value === "commit_webhook" ||
+    value === "mr_webhook"
+  );
 }
 
 function isReviewJobStatus(value: string): value is ReviewJobStatus {
@@ -1351,6 +1587,10 @@ function emptyReviewMeta(): ReviewMeta {
     model: null,
     reasoningEffort: null,
     promptVersion: null,
+    reviewStrategy: null,
+    triageUsed: null,
+    triageRiskLevel: null,
+    triageReason: null,
     inputTokens: null,
     outputTokens: null,
     reasoningTokens: null,
@@ -1366,6 +1606,11 @@ function stringFromMetadata(metadata: Record<string, unknown>, key: string): str
 function numberFromMetadata(metadata: Record<string, unknown>, key: string): number | null {
   const value = metadata[key];
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function booleanFromMetadata(metadata: Record<string, unknown>, key: string): boolean | null {
+  const value = metadata[key];
+  return typeof value === "boolean" ? value : null;
 }
 
 function safeMetadata(metadata: Record<string, unknown>): Record<string, unknown> {

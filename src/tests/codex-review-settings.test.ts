@@ -9,7 +9,7 @@ describe("CodexReviewSettingsService", () => {
 
     await expect(service.getEffectiveReviewSettings()).resolves.toMatchObject({
       model: "gpt-5.5",
-      reasoningEffort: "xhigh",
+      strategyMode: "project",
       isDefault: true
     });
 
@@ -23,18 +23,17 @@ describe("CodexReviewSettingsService", () => {
 
     const settings = await service.updateReviewSettings(
       { id: adminId, role: "admin" },
-      { model: "gpt-5.4", reasoningEffort: "high" }
+      { model: "gpt-5.4" }
     );
 
     expect(settings).toMatchObject({
       model: "gpt-5.4",
-      reasoningEffort: "high",
+      strategyMode: "project",
       isDefault: false,
       updatedByUserId: adminId
     });
     await expect(service.getEffectiveReviewSettings()).resolves.toMatchObject({
-      model: "gpt-5.4",
-      reasoningEffort: "high"
+      model: "gpt-5.4"
     });
 
     await db.$disconnect();
@@ -46,13 +45,10 @@ describe("CodexReviewSettingsService", () => {
     const userId = await insertTestUser(db, { gitlabUserId: 1, username: "user", role: "user" });
 
     await expect(
-      service.updateReviewSettings({ id: userId, role: "user" }, { model: "gpt-5.4", reasoningEffort: "high" })
+      service.updateReviewSettings({ id: userId, role: "user" }, { model: "gpt-5.4" })
     ).rejects.toBeInstanceOf(CodexReviewSettingsPermissionError);
     await expect(
-      service.updateReviewSettings({ id: userId, role: "admin" }, { model: " ", reasoningEffort: "high" })
-    ).rejects.toBeInstanceOf(CodexReviewSettingsError);
-    await expect(
-      service.updateReviewSettings({ id: userId, role: "admin" }, { model: "gpt-5.4", reasoningEffort: "extreme" })
+      service.updateReviewSettings({ id: userId, role: "admin" }, { model: " " })
     ).rejects.toBeInstanceOf(CodexReviewSettingsError);
 
     await db.$disconnect();

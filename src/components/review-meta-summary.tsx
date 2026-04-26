@@ -10,11 +10,11 @@ export function ReviewMetaSummary({ meta }: { meta: ReviewMeta | null }) {
       {(meta.model || meta.reasoningEffort) && (
         <span>
           {meta.model ?? "Codex"}
-          {meta.reasoningEffort ? ` · ${meta.reasoningEffort}` : ""}
+          {meta.reviewStrategy ? ` · ${strategyExecutionLabel(meta.reviewStrategy, meta.reasoningEffort)}` : meta.reasoningEffort ? ` · ${meta.reasoningEffort}` : ""}
         </span>
       )}
       {meta.totalTokens !== null && <span>토큰 {formatCompactNumber(meta.totalTokens)}</span>}
-      {meta.reasoningTokens !== null && <span>이성 {formatCompactNumber(meta.reasoningTokens)}</span>}
+      {meta.reasoningTokens !== null && <span>reasoning {formatCompactNumber(meta.reasoningTokens)}</span>}
     </div>
   );
 }
@@ -24,11 +24,21 @@ function hasReviewMeta(meta: ReviewMeta): boolean {
     meta.model ||
       meta.reasoningEffort ||
       meta.promptVersion ||
+      meta.reviewStrategy ||
+      meta.triageUsed !== null ||
+      meta.triageRiskLevel ||
+      meta.triageReason ||
       meta.inputTokens !== null ||
       meta.outputTokens !== null ||
       meta.reasoningTokens !== null ||
       meta.totalTokens !== null
   );
+}
+
+function strategyExecutionLabel(strategy: string, effort: string | null): string {
+  if (!effort) return strategy;
+  if (strategy === "auto") return `auto → ${effort}`;
+  return `${strategy} → ${effort}`;
 }
 
 function formatCompactNumber(value: number): string {

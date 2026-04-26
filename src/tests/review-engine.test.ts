@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { REVIEW_OUTPUT_SCHEMA, buildReviewPrompt, renderReviewMarkdown, shouldTreatAsFindings, type StructuredReview } from "../lib/prompts";
 import { CodexReviewEngine, type ReviewEngineEvent } from "../lib/review-engine";
+import { CodexReviewTriageEngine, TRIAGE_OUTPUT_SCHEMA } from "../lib/review-triage";
 
 const codexMocks = vi.hoisted(() => {
   const runStreamed = vi.fn();
@@ -45,7 +46,7 @@ describe("CodexReviewEngine", () => {
     );
     expect(codexMocks.startThread).toHaveBeenCalledWith({
       model: "gpt-5.5",
-      modelReasoningEffort: "xhigh",
+      modelReasoningEffort: "high",
       workingDirectory: "/workspaces/service",
       skipGitRepoCheck: true,
       sandboxMode: "read-only",
@@ -250,6 +251,51 @@ describe("CodexReviewEngine", () => {
         diffText: "diff text"
       })
     ).rejects.toThrow("Codex review response was empty");
+  });
+
+  it("runs Codex triage with medium reasoning and parses the recommended effort", async () => {
+    codexMocks.runStreamed.mockResolvedValue({
+      events: eventsForRawResponse(
+        JSON.stringify({
+          recommendedReasoningEffort: "xhigh",
+          riskLevel: "high",
+          reason: "worker lock과 webhook 흐름을 함께 바꿉니다.",
+          riskSignals: ["동시성", "webhook"]
+        })
+      )
+    });
+
+    const result = await new CodexReviewTriageEngine({ codexHome: "/srv/app/.data/codex" }).triage(
+      {
+        kind: "merge_request",
+        repoName: "group/service",
+        sha: "abc123",
+        diffText: "diff --git a/src/worker.ts b/src/worker.ts",
+        changedFiles: ["src/worker.ts"],
+        diffBytes: 512,
+        diffTruncated: false,
+        omittedFiles: 0,
+        workingDirectory: "/workspaces/service"
+      },
+      { model: "gpt-5.5" }
+    );
+
+    expect(codexMocks.startThread).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: "gpt-5.5",
+        modelReasoningEffort: "medium",
+        workingDirectory: "/workspaces/service",
+        skipGitRepoCheck: true
+      })
+    );
+    expect(codexMocks.runStreamed).toHaveBeenCalledWith(expect.stringContaining("Your only task is to estimate the risk"), {
+      outputSchema: TRIAGE_OUTPUT_SCHEMA
+    });
+    expect(result).toMatchObject({
+      recommendedReasoningEffort: "xhigh",
+      riskLevel: "high",
+      riskSignals: ["동시성", "webhook"]
+    });
   });
 });
 

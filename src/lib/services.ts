@@ -10,6 +10,8 @@ import { UserAdminService } from "./user-admin";
 import { ReviewerBotService } from "./reviewer-bot";
 import { CodexReviewEngine } from "./review-engine";
 import { CodexReviewSettingsService } from "./codex-review-settings";
+import { GitLabWebhookService } from "./gitlab-webhooks";
+import { CodexReviewTriageEngine } from "./review-triage";
 
 export const config = loadConfig();
 process.env.CODEX_HOME = config.codexHome;
@@ -21,9 +23,14 @@ export const codexAuth = new CodexAuthService(codexAppServer);
 export const reviewState = new ReviewStateStore(prisma);
 export const userAdmin = new UserAdminService(prisma);
 export const reviewerBot = new ReviewerBotService(prisma, config, secrets);
+export const gitlabWebhooks = new GitLabWebhookService(config, reviewState, reviewerBot, secrets);
 export const codexReviewSettings = new CodexReviewSettingsService(prisma);
 export const reviewEngine = new CodexReviewEngine({
   codexBin: config.codexBin,
   codexHome: config.codexHome
 });
-export const reviewWorker = new ReviewWorker(config, gitlabOAuth, reviewState, reviewerBot, reviewEngine, codexReviewSettings);
+export const reviewTriageEngine = new CodexReviewTriageEngine({
+  codexBin: config.codexBin,
+  codexHome: config.codexHome
+});
+export const reviewWorker = new ReviewWorker(config, gitlabOAuth, reviewState, reviewerBot, reviewEngine, reviewTriageEngine, codexReviewSettings);

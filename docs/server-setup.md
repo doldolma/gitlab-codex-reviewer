@@ -51,7 +51,7 @@ npm run start:worker
 Docker Compose 배포에서는 장기 실행 서비스가 `web`, `worker` 두 개만 뜹니다.
 
 - `web`: 시작 전에 `npm run db:deploy`를 실행하고 Next.js standalone server를 띄웁니다.
-- `worker`: `web` healthcheck가 통과한 뒤 시작해 polling과 review job을 처리합니다.
+- `worker`: `web` healthcheck가 통과한 뒤 시작해 webhook review job과 fallback polling을 처리합니다.
 
 ```bash
 cp .env.example .env.prod
@@ -110,8 +110,11 @@ Reviewer Bot PAT는 SQLite DB에 암호화되어 저장됩니다. `.data/app-sec
 
 - `PUBLIC_BASE_URL`은 외부 접속 URL과 정확히 같아야 합니다.
 - GitLab OAuth redirect URI는 `${PUBLIC_BASE_URL}/api/auth/gitlab/callback`입니다.
+- GitLab webhook URL은 `${PUBLIC_BASE_URL}/api/gitlab/webhook`입니다.
 - 예를 들어 `PUBLIC_BASE_URL=http://127.0.0.1:3000`이면 `http://localhost:3000`이 아니라 `http://127.0.0.1:3000`으로 접속해야 같은 session cookie를 사용합니다.
 - `.env`와 `.data`는 repository에 commit하지 않습니다.
+
+Webhook 자동 생성과 수신을 사용하려면 `PUBLIC_BASE_URL`이 GitLab 서버에서 접근 가능한 URL이어야 합니다. 운영에서는 HTTPS를 권장합니다.
 
 예:
 

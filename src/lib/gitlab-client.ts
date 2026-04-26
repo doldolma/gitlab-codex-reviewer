@@ -62,6 +62,16 @@ export type GitLabProject = {
   default_branch?: string | null;
 };
 
+export type GitLabProjectHook = {
+  id: number;
+  url: string;
+  project_id?: number;
+  push_events?: boolean;
+  merge_requests_events?: boolean;
+  enable_ssl_verification?: boolean;
+  name?: string | null;
+};
+
 export type GitLabBranch = {
   name: string;
   default: boolean;
@@ -93,6 +103,24 @@ export class GitLabClient {
     return this.request<GitLabProject>(`/api/v4/projects/${encodeProjectId(projectId)}`, {
       method: "GET"
     });
+  }
+
+  async listProjectHooks(projectId: string): Promise<GitLabProjectHook[]> {
+    return this.paginate<GitLabProjectHook>(`/api/v4/projects/${encodeProjectId(projectId)}/hooks`, {
+      per_page: "100"
+    });
+  }
+
+  async createProjectHook(projectId: string, input: { url: string; token: string; name?: string }): Promise<GitLabProjectHook> {
+    return this.writeProjectHook("POST", `/api/v4/projects/${encodeProjectId(projectId)}/hooks`, input);
+  }
+
+  async updateProjectHook(
+    projectId: string,
+    hookId: number,
+    input: { url: string; token: string; name?: string }
+  ): Promise<GitLabProjectHook> {
+    return this.writeProjectHook("PUT", `/api/v4/projects/${encodeProjectId(projectId)}/hooks/${hookId}`, input);
   }
 
   async listBranches(projectId: string, search?: string): Promise<GitLabBranch[]> {
@@ -204,6 +232,42 @@ export class GitLabClient {
         body: JSON.stringify({ note })
       }
     );
+  }
+
+  async deleteProjectHook(projectId: string, hookId: number): Promise<void> {
+    await this.rawRequest(new URL(`/api/v4/projects/${encodeProjectId(projectId)}/hooks/${hookId}`, this.connection.gitlabHost), {
+      method: "DELETE"
+    });
+  }
+
+  private async writeProjectHook(
+    method: "POST" | "PUT",
+    path: string,
+    input: { url: string; token: string; name?: string }
+  ): Promise<GitLabProjectHook> {
+    const body = {
+      url: input.url,
+      token: input.token,
+      push_events: true,
+      merge_requests_events: true,
+      enable_ssl_verification: true,
+      ...(input.name ? { name: input.name } : {})
+    };
+    try {
+      return await this.request<GitLabProjectHook>(path, {
+        method,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body)
+      });
+    } catch (error) {
+      if (!input.name) throw error;
+      const { name: _name, ...bodyWithoutName } = body;
+      return this.request<GitLabProjectHook>(path, {
+        method,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(bodyWithoutName)
+      });
+    }
   }
 
   private async paginate<T>(path: string, params: Record<string, string>): Promise<T[]> {

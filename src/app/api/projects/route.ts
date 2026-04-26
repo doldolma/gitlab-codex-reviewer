@@ -3,15 +3,13 @@ import { z } from "zod";
 import { jsonError, readJson } from "../../../lib/api-helpers";
 import { GitLabClient } from "../../../lib/gitlab-client";
 import { isAuthFailure, requireSessionUser } from "../../../lib/session";
-import { gitlabOAuth, reviewState } from "../../../lib/services";
+import { gitlabOAuth, gitlabWebhooks, reviewState } from "../../../lib/services";
 
 export const runtime = "nodejs";
 
 const projectInput = z.object({
   gitlabProjectId: z.string().min(1),
-  displayName: z.string().min(1),
   enabled: z.boolean().default(true),
-  skipLabels: z.array(z.string()).default([]),
   mrTargetBranches: z.array(z.string()).default([]),
   commitBranches: z.array(z.string()).default([])
 });
@@ -40,11 +38,15 @@ export async function POST(request: Request) {
       cloneHttpUrl: gitlabProject.http_url_to_repo ?? null,
       defaultBranch: gitlabProject.default_branch ?? null
     });
+    const ensuredProject = await gitlabWebhooks.ensureProjectWebhook(sharedProject);
+    const displayName = gitlabProject.name_with_namespace || gitlabProject.path_with_namespace || String(gitlabProject.id);
     return NextResponse.json({
       project: await reviewState.createProject(user.id, {
         ...input,
-        gitlabProjectId: sharedProject.gitlabProjectId,
-        gitlabProjectRefId: sharedProject.id
+        displayName,
+        skipLabels: [],
+        gitlabProjectId: ensuredProject.gitlabProjectId,
+        gitlabProjectRefId: ensuredProject.id
       })
     });
   } catch (error) {
@@ -55,7 +57,6 @@ export async function POST(request: Request) {
 function normalizeProjectInput(input: z.infer<typeof projectInput>): z.infer<typeof projectInput> {
   return {
     ...input,
-    skipLabels: uniqueNonEmpty(input.skipLabels),
     mrTargetBranches: uniqueNonEmpty(input.mrTargetBranches),
     commitBranches: uniqueNonEmpty(input.commitBranches)
   };

@@ -10,7 +10,7 @@ export async function GET() {
   const settings = await codexReviewSettings.getEffectiveReviewSettings();
   const reviewRuntimeStatus = {
     reviewModel: settings.model,
-    reviewReasoningEffort: settings.reasoningEffort
+    reviewStrategyMode: settings.strategyMode
   };
 
   try {

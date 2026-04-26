@@ -7,9 +7,7 @@ import { reviewState } from "../../../../lib/services";
 export const runtime = "nodejs";
 
 const projectUpdate = z.object({
-  displayName: z.string().min(1),
   enabled: z.boolean().default(true),
-  skipLabels: z.array(z.string()).default([]),
   mrTargetBranches: z.array(z.string()).default([]),
   commitBranches: z.array(z.string()).default([])
 });
@@ -32,7 +30,6 @@ export async function PUT(request: Request, context: RouteContext) {
 function normalizeProjectInput(input: z.infer<typeof projectUpdate>): z.infer<typeof projectUpdate> {
   return {
     ...input,
-    skipLabels: uniqueNonEmpty(input.skipLabels),
     mrTargetBranches: uniqueNonEmpty(input.mrTargetBranches),
     commitBranches: uniqueNonEmpty(input.commitBranches)
   };

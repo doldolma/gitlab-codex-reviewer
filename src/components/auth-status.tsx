@@ -96,7 +96,7 @@ export function AuthStatusPanel() {
         <div>
           <span className="eyebrow">Reviewer Bot</span>
           <strong>{reviewerBot.data?.connected ? reviewerBot.data.name ?? reviewerBot.data.username : "연결되지 않음"}</strong>
-          <p>GitLab 리뷰 댓글 작성과 workspace checkout에 사용됩니다</p>
+          <p>{reviewerBot.data?.connected ? reviewerBot.data.username : "Settings에서 연결할 수 있습니다"}</p>
         </div>
       </div>
 
@@ -110,7 +110,7 @@ export function AuthStatusPanel() {
           {isAdmin && <p>{codexAccountDetail}</p>}
           <div className="review-meta-summary auth-meta">
             <span>{codex.data?.reviewModel ?? "gpt-5.5"}</span>
-            <span>{codex.data?.reviewReasoningEffort ?? "xhigh"}</span>
+            <span>프로젝트별 전략</span>
           </div>
           {isAdmin && deviceLogin && !codex.data?.authenticated && (
             <div className="device-login-card">

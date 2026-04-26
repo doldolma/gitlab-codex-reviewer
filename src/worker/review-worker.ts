@@ -1,14 +1,16 @@
 import type { GitLabOAuthService } from "../lib/gitlab-oauth";
 import type { AppConfig } from "../lib/config";
-import { defaultRuntimeSettings, type CodexReviewRuntimeSettings } from "../lib/codex-review-settings";
+import { defaultModelSettings, runtimeSettings, type CodexReviewModelSettings, type CodexReviewRuntimeSettings } from "../lib/codex-review-settings";
 import { CodexReviewEngine, type Reviewer } from "../lib/review-engine";
-import { formatCommitDiffForReview, formatDiffForReview } from "../lib/diff-formatter";
-import { GitLabClient, type GitLabCommit, type GitLabMergeRequest } from "../lib/gitlab-client";
+import { formatCommitDiffForReview, formatDiffForReview, type FormattedDiff } from "../lib/diff-formatter";
+import { GitLabClient, type GitLabCommit, type GitLabDiff, type GitLabMergeRequest } from "../lib/gitlab-client";
 import { GitWorkspaceManager } from "../lib/git-workspace";
 import { logReview, type ReviewLogSource } from "../lib/logger";
 import { publishCommitReviewNote, publishReviewNote } from "../lib/note-publisher";
 import { REVIEW_PROMPT_VERSION, type ReviewPromptInput } from "../lib/prompts";
 import type { ReviewerBotService } from "../lib/reviewer-bot";
+import { resolveFixedReviewStrategy, type ReviewStrategy, type ReviewStrategyResolution } from "../lib/review-strategy";
+import { CodexReviewTriageEngine, type ReviewTriageRunner } from "../lib/review-triage";
 import {
   ReviewStateStore,
   type CommitReviewRunView,
@@ -24,7 +26,7 @@ import {
 
 type ScanSummary = { reviewed: number; skipped: number; errors: number };
 type ReviewSettingsProvider = {
-  getEffectiveReviewSettings(): Promise<CodexReviewRuntimeSettings>;
+  getEffectiveReviewSettings(): Promise<CodexReviewModelSettings>;
 };
 type EventContext = {
   source: ReviewLogSource;
@@ -33,6 +35,9 @@ type EventContext = {
   project: string;
   sha: string;
 };
+
+const REVIEW_JOB_HEARTBEAT_MS = 30_000;
+const STALE_REVIEW_JOB_MS = 2 * 60_000;
 
 export class ReviewWorker {
   private running = false;
@@ -43,9 +48,10 @@ export class ReviewWorker {
     private readonly state: ReviewStateStore,
     private readonly reviewerBot: ReviewerBotService,
     private readonly reviewer: Reviewer = new CodexReviewEngine(),
+    private readonly triageRunner: ReviewTriageRunner = new CodexReviewTriageEngine(),
     private readonly reviewSettings: ReviewSettingsProvider = {
       async getEffectiveReviewSettings() {
-        return defaultRuntimeSettings();
+        return defaultModelSettings();
       }
     }
   ) {
@@ -206,6 +212,11 @@ export class ReviewWorker {
   }
 
   async processQueuedJobs(limit = 3): Promise<{ processed: number; deferred: number; failed: number }> {
+    const recovered = await this.state.recoverStaleRunningJobs(STALE_REVIEW_JOB_MS);
+    if (recovered > 0) {
+      console.warn(`[worker] [review] Recovered ${recovered} stale running review job(s).`);
+    }
+
     const jobs: ReviewJobView[] = [];
     for (let index = 0; index < limit; index += 1) {
       const job = await this.state.claimNextReviewJob();
@@ -222,6 +233,13 @@ export class ReviewWorker {
   }
 
   private async processClaimedJob(job: ReviewJobView): Promise<"processed" | "deferred" | "failed"> {
+    const heartbeat = setInterval(() => {
+      void this.state.heartbeatReviewJob(job.id).catch((error) => {
+        console.warn(`[worker] [review] Failed to heartbeat job=${job.id}`, error);
+      });
+    }, REVIEW_JOB_HEARTBEAT_MS);
+    heartbeat.unref?.();
+
     try {
       const result = await this.executeReviewJob(job);
       if (result === "deferred") return "deferred";
@@ -232,6 +250,8 @@ export class ReviewWorker {
       await this.state.failReviewJob(job.id, error);
       console.error(`[worker] [review] Job failed: id=${job.id}, kind=${job.kind}`, error);
       return "failed";
+    } finally {
+      clearInterval(heartbeat);
     }
   }
 
@@ -274,11 +294,91 @@ export class ReviewWorker {
         return this.executeCommitRetryJob(job);
       case "mr_retry":
         return this.executeMrRetryJob(job);
+      case "commit_webhook":
+        return this.executeWebhookCommitJob(job);
+      case "mr_webhook":
+        return this.executeWebhookMrJob(job);
       case "scan_user":
         await this.scanOnce(job.userId);
         return "processed";
       default:
         throw new Error(`Unknown review job kind: ${job.kind}`);
+    }
+  }
+
+  private async executeWebhookCommitJob(job: ReviewJobView): Promise<"processed" | "deferred"> {
+    const gitlabProjectRefId = numberFromPayload(job.payload, "gitlabProjectRefId");
+    const commitSha = stringFromPayload(job.payload, "commitSha");
+    if (!gitlabProjectRefId || !commitSha) throw new Error("Webhook commit review job payload is invalid");
+    const branchName = stringFromPayload(job.payload, "branchName");
+    const botConnection = await this.reviewerBot.getConnection();
+    if (!botConnection) throw new Error("Reviewer bot token is not connected");
+    const client = new GitLabClient(botConnection);
+    const sharedProject = await this.state.getGitlabProject(gitlabProjectRefId);
+    const projectLockKey = `project:${sharedProject.gitlabHost}:${sharedProject.gitlabProjectId}`;
+    if (!(await this.state.acquireLock(projectLockKey))) {
+      await this.requeueBusyJob(job, "Project review is already running.");
+      return "deferred";
+    }
+    try {
+      const commit = await client.getCommit(sharedProject.gitlabProjectId, commitSha);
+      const didReview = await this.reviewCommitShared(
+        client,
+        botConnection.accessToken,
+        job.userId,
+        null,
+        sharedProject,
+        branchName,
+        commit,
+        "auto",
+        "worker"
+      );
+      if (!didReview) {
+        await this.requeueBusyJob(job, "Commit review lock is already held.");
+        return "deferred";
+      }
+      return "processed";
+    } finally {
+      await this.state.releaseLock(projectLockKey);
+    }
+  }
+
+  private async executeWebhookMrJob(job: ReviewJobView): Promise<"processed" | "deferred"> {
+    const gitlabProjectRefId = numberFromPayload(job.payload, "gitlabProjectRefId");
+    const mrIid = numberFromPayload(job.payload, "mrIid");
+    const headSha = stringFromPayload(job.payload, "headSha");
+    if (!gitlabProjectRefId || !mrIid || !headSha) throw new Error("Webhook MR review job payload is invalid");
+    const botConnection = await this.reviewerBot.getConnection();
+    if (!botConnection) throw new Error("Reviewer bot token is not connected");
+    const client = new GitLabClient(botConnection);
+    const sharedProject = await this.state.getGitlabProject(gitlabProjectRefId);
+    const projectLockKey = `project:${sharedProject.gitlabHost}:${sharedProject.gitlabProjectId}`;
+    if (!(await this.state.acquireLock(projectLockKey))) {
+      await this.requeueBusyJob(job, "Project review is already running.");
+      return "deferred";
+    }
+    try {
+      const mrs = await client.listOpenedMergeRequests(sharedProject.gitlabProjectId);
+      const mr = mrs.find((candidate) => candidate.iid === mrIid);
+      if (!mr) throw new Error("Merge request is no longer opened");
+      const representativeProjectId = numberFromPayload(job.payload, "projectId");
+      if (!representativeProjectId) throw new Error("Webhook MR review job payload is missing representative project id");
+      const didReview = await this.reviewMrShared(
+        client,
+        botConnection.accessToken,
+        sharedProject,
+        { id: representativeProjectId },
+        mr,
+        headSha,
+        "worker"
+      );
+      if (!didReview) {
+        await this.requeueBusyJob(job, "MR review lock is already held.");
+        return "deferred";
+      }
+      return "processed";
+    } finally {
+      await this.state.releaseLock(projectLockKey);
     }
   }
 
@@ -713,10 +813,18 @@ export class ReviewWorker {
         gitlabProjectRefId: null,
         gitlabProjectId,
         displayName,
+        webUrl: null,
         enabled: true,
         skipLabels: [],
         mrTargetBranches: [],
-        commitBranches: []
+        commitBranches: [],
+        reviewStrategy: "balanced",
+        reviewStrategyUpdatedByUserId: null,
+        reviewStrategyUpdatedAt: null,
+        webhookStatus: "missing",
+        webhookUrl: null,
+        webhookLastVerifiedAt: null,
+        webhookError: null
       },
       mr,
       headSha,
@@ -746,10 +854,11 @@ export class ReviewWorker {
         truncated: formatted.truncated,
         omittedFiles: formatted.omittedFiles
       });
-      const runtimeSettings = await this.reviewSettings.getEffectiveReviewSettings();
-      await this.recordEvent(context, "info", "codex_started", "Codex review started.", codexStartMetadata(runtimeSettings));
+      const reviewInput = buildMrReviewInput(project.displayName, mr, headSha, formatted.text, null);
+      const { runtimeSettings, resolution } = await this.resolveRuntimeSettings(context, project.reviewStrategy, reviewInput, formatted, diffs);
+      await this.recordEvent(context, "info", "codex_started", "Codex review started.", codexStartMetadata(runtimeSettings, resolution));
       const result = await this.reviewer.review(
-        buildMrReviewInput(project.displayName, mr, headSha, formatted.text, null),
+        reviewInput,
         (event) => this.recordEvent(context, event.level, event.step, event.message, event.metadata),
         runtimeSettings
       );
@@ -818,10 +927,11 @@ export class ReviewWorker {
         omittedFiles: formatted.omittedFiles
       });
       const checkout = await this.checkoutWorkspace(context, gitlabProject, botToken, headSha);
-      const runtimeSettings = await this.reviewSettings.getEffectiveReviewSettings();
-      await this.recordEvent(context, "info", "codex_started", "Codex review started.", codexStartMetadata(runtimeSettings));
+      const reviewInput = buildMrReviewInput(projectDisplayName(gitlabProject), mr, headSha, formatted.text, checkout.path);
+      const { runtimeSettings, resolution } = await this.resolveRuntimeSettings(context, gitlabProject.reviewStrategy, reviewInput, formatted, diffs);
+      await this.recordEvent(context, "info", "codex_started", "Codex review started.", codexStartMetadata(runtimeSettings, resolution));
       const result = await this.reviewer.review(
-        buildMrReviewInput(projectDisplayName(gitlabProject), mr, headSha, formatted.text, checkout.path),
+        reviewInput,
         (event) => this.recordEvent(context, event.level, event.step, event.message, event.metadata),
         runtimeSettings
       );
@@ -886,10 +996,11 @@ export class ReviewWorker {
         truncated: formatted.truncated,
         omittedFiles: formatted.omittedFiles
       });
-      const runtimeSettings = await this.reviewSettings.getEffectiveReviewSettings();
-      await this.recordEvent(context, "info", "codex_started", "Codex review started.", codexStartMetadata(runtimeSettings));
+      const reviewInput = buildCommitReviewInput(project?.displayName ?? gitlabProjectId, commit, branchName, formatted.text, null);
+      const { runtimeSettings, resolution } = await this.resolveRuntimeSettings(context, project?.reviewStrategy ?? "balanced", reviewInput, formatted, diffs);
+      await this.recordEvent(context, "info", "codex_started", "Codex review started.", codexStartMetadata(runtimeSettings, resolution));
       const result = await this.reviewer.review(
-        buildCommitReviewInput(project?.displayName ?? gitlabProjectId, commit, branchName, formatted.text, null),
+        reviewInput,
         (event) => this.recordEvent(context, event.level, event.step, event.message, event.metadata),
         runtimeSettings
       );
@@ -972,10 +1083,11 @@ export class ReviewWorker {
         omittedFiles: formatted.omittedFiles
       });
       const checkout = await this.checkoutWorkspace(context, gitlabProject, botToken, commit.id);
-      const runtimeSettings = await this.reviewSettings.getEffectiveReviewSettings();
-      await this.recordEvent(context, "info", "codex_started", "Codex review started.", codexStartMetadata(runtimeSettings));
+      const reviewInput = buildCommitReviewInput(projectDisplayName(gitlabProject), commit, branchName, formatted.text, checkout.path);
+      const { runtimeSettings, resolution } = await this.resolveRuntimeSettings(context, gitlabProject.reviewStrategy, reviewInput, formatted, diffs);
+      await this.recordEvent(context, "info", "codex_started", "Codex review started.", codexStartMetadata(runtimeSettings, resolution));
       const result = await this.reviewer.review(
-        buildCommitReviewInput(projectDisplayName(gitlabProject), commit, branchName, formatted.text, checkout.path),
+        reviewInput,
         (event) => this.recordEvent(context, event.level, event.step, event.message, event.metadata),
         runtimeSettings
       );
@@ -1011,6 +1123,86 @@ export class ReviewWorker {
       throw error;
     } finally {
       await this.state.releaseLock(lockKey);
+    }
+  }
+
+  private async resolveRuntimeSettings(
+    context: EventContext,
+    strategy: ReviewStrategy,
+    reviewInput: ReviewPromptInput,
+    formatted: FormattedDiff,
+    diffs: GitLabDiff[]
+  ): Promise<{ runtimeSettings: CodexReviewRuntimeSettings; resolution: ReviewStrategyResolution }> {
+    const modelSettings = await this.reviewSettings.getEffectiveReviewSettings();
+
+    if (strategy !== "auto") {
+      const resolution = resolveFixedReviewStrategy(strategy);
+      const settings = runtimeSettings(modelSettings.model, resolution.effectiveReasoningEffort);
+      await this.recordEvent(context, "info", "review_strategy_selected", "Review strategy selected.", {
+        ...strategyMetadata(settings, resolution)
+      });
+      return { runtimeSettings: settings, resolution };
+    }
+
+    await this.recordEvent(context, "info", "codex_triage_started", "Codex triage started for auto review strategy.", {
+      model: modelSettings.model,
+      modelReasoningEffort: "medium",
+      reviewStrategy: strategy,
+      diffBytes: Buffer.byteLength(formatted.text, "utf8"),
+      diffFileCount: diffs.length,
+      diffTruncated: formatted.truncated,
+      omittedFiles: formatted.omittedFiles
+    });
+
+    try {
+      const triage = await this.triageRunner.triage(
+        {
+          ...reviewInput,
+          changedFiles: changedFilesFromDiffs(diffs),
+          diffBytes: Buffer.byteLength(formatted.text, "utf8"),
+          diffTruncated: formatted.truncated,
+          omittedFiles: formatted.omittedFiles
+        },
+        modelSettings
+      );
+      const resolution: ReviewStrategyResolution = {
+        configuredStrategy: "auto",
+        effectiveReasoningEffort: triage.recommendedReasoningEffort,
+        triageUsed: true,
+        triageRiskLevel: triage.riskLevel,
+        triageReason: triage.reason,
+        triageRiskSignals: triage.riskSignals
+      };
+      const settings = runtimeSettings(modelSettings.model, resolution.effectiveReasoningEffort);
+      await this.recordEvent(context, "info", "codex_triage_finished", "Codex triage selected review effort.", {
+        ...strategyMetadata(settings, resolution),
+        inputTokens: triage.usage?.input_tokens ?? null,
+        outputTokens: triage.usage?.output_tokens ?? null,
+        reasoningOutputTokens: triage.usage?.reasoning_output_tokens ?? null,
+        totalTokens: triage.usage ? triage.usage.input_tokens + triage.usage.output_tokens : null
+      });
+      await this.recordEvent(context, "info", "review_strategy_selected", "Review strategy selected.", {
+        ...strategyMetadata(settings, resolution)
+      });
+      return { runtimeSettings: settings, resolution };
+    } catch (error) {
+      const resolution: ReviewStrategyResolution = {
+        configuredStrategy: "auto",
+        effectiveReasoningEffort: "high",
+        triageUsed: true,
+        triageRiskLevel: null,
+        triageReason: `Triage failed; using high as safe fallback. ${errorMessage(error)}`,
+        triageRiskSignals: []
+      };
+      const settings = runtimeSettings(modelSettings.model, resolution.effectiveReasoningEffort);
+      await this.recordEvent(context, "warn", "codex_triage_failed", "Codex triage failed; falling back to high.", {
+        error: errorMessage(error),
+        ...strategyMetadata(settings, resolution)
+      });
+      await this.recordEvent(context, "info", "review_strategy_selected", "Review strategy selected.", {
+        ...strategyMetadata(settings, resolution)
+      });
+      return { runtimeSettings: settings, resolution };
     }
   }
 
@@ -1090,11 +1282,25 @@ function projectDisplayName(project: GitlabProjectRow): string {
   return project.nameWithNamespace ?? project.pathWithNamespace ?? project.gitlabProjectId;
 }
 
-function codexStartMetadata(settings: CodexReviewRuntimeSettings): Record<string, string> {
+function codexStartMetadata(settings: CodexReviewRuntimeSettings, resolution: ReviewStrategyResolution): Record<string, unknown> {
   return {
     promptVersion: REVIEW_PROMPT_VERSION,
     model: settings.model,
-    modelReasoningEffort: settings.reasoningEffort
+    modelReasoningEffort: settings.reasoningEffort,
+    ...strategyMetadata(settings, resolution)
+  };
+}
+
+function strategyMetadata(settings: CodexReviewRuntimeSettings, resolution: ReviewStrategyResolution): Record<string, unknown> {
+  return {
+    model: settings.model,
+    modelReasoningEffort: settings.reasoningEffort,
+    reviewStrategy: resolution.configuredStrategy,
+    effectiveReasoningEffort: resolution.effectiveReasoningEffort,
+    triageUsed: resolution.triageUsed,
+    triageRiskLevel: resolution.triageRiskLevel,
+    triageReason: resolution.triageReason,
+    triageRiskSignals: resolution.triageRiskSignals
   };
 }
 
@@ -1142,6 +1348,15 @@ function buildCommitReviewInput(
     diffText,
     workingDirectory
   };
+}
+
+function changedFilesFromDiffs(diffs: GitLabDiff[]): string[] {
+  return uniqueNonEmpty(
+    diffs.flatMap((diff) => {
+      if (diff.old_path === diff.new_path) return [diff.new_path];
+      return [diff.old_path, diff.new_path];
+    })
+  ).slice(0, 200);
 }
 
 function timestampForCommit(commit: GitLabCommit): number {

@@ -1,6 +1,6 @@
 import type { ReviewEvent } from "../lib/api-client";
 import type { ReactNode } from "react";
-import { CheckCircle2, Cpu, Gauge, MessageSquareText, Terminal, XCircle } from "lucide-react";
+import { CheckCircle2, Cpu, Gauge, MessageSquareText, SlidersHorizontal, Terminal, XCircle } from "lucide-react";
 
 const PROGRESS_STAGES = ["대기 중", "GitLab diff 준비", "workspace checkout", "Codex 리뷰", "결과 게시", "완료"];
 
@@ -47,6 +47,9 @@ export function ReviewEventTimeline({ events, isLoading }: { events: ReviewEvent
 
 function TimelineEvent({ event }: { event: ReviewEvent }) {
   if (event.step === "codex_started") return <CodexStartedEvent event={event} />;
+  if (event.step === "review_strategy_selected" || event.step === "codex_triage_finished" || event.step === "codex_triage_failed") {
+    return <StrategyEvent event={event} />;
+  }
   if (event.step === "codex_tool_used") return <CodexToolEvent event={event} />;
   if (event.step === "codex_message") return <CodexMessageEvent event={event} />;
   if (event.step === "codex_usage") return <CodexUsageEvent event={event} />;
@@ -73,9 +76,35 @@ function CodexStartedEvent({ event }: { event: ReviewEvent }) {
       <EventHeader event={event} icon={<Cpu size={16} />} title="Codex 리뷰 시작" />
       <div className="activity-badges">
         <span>{model}</span>
-        {effort && <span>이성 {effort}</span>}
+        {effort && <span>{effort}</span>}
         {promptVersion && <span>{promptVersion}</span>}
       </div>
+      <RawMetadata event={event} />
+    </li>
+  );
+}
+
+function StrategyEvent({ event }: { event: ReviewEvent }) {
+  const strategy = stringMetadata(event, "reviewStrategy");
+  const effort = stringMetadata(event, "effectiveReasoningEffort") ?? stringMetadata(event, "modelReasoningEffort");
+  const riskLevel = stringMetadata(event, "triageRiskLevel");
+  const reason = stringMetadata(event, "triageReason");
+  const signals = arrayMetadata(event, "triageRiskSignals");
+  return (
+    <li className={`event-item codex-activity ${event.level}`}>
+      <EventHeader event={event} icon={<SlidersHorizontal size={16} />} title={labelForStep(event.step)} badge={effort ?? undefined} />
+      <div className="activity-badges">
+        {strategy && <span>{strategyLabel(strategy)}</span>}
+        {riskLevel && <span>위험도 {riskLevelLabel(riskLevel)}</span>}
+      </div>
+      {reason && <p>{reason}</p>}
+      {signals.length > 0 && (
+        <ul className="compact-list">
+          {signals.slice(0, 5).map((signal) => (
+            <li key={signal}>{signal}</li>
+          ))}
+        </ul>
+      )}
       <RawMetadata event={event} />
     </li>
   );
@@ -144,7 +173,7 @@ function CodexUsageEvent({ event }: { event: ReviewEvent }) {
         <Metric label="입력" value={input} />
         <Metric label="캐시" value={cached} />
         <Metric label="출력" value={output} />
-        <Metric label="이성" value={reasoning} />
+        <Metric label="Reasoning" value={reasoning} />
         <Metric label="전체" value={total} />
       </div>
       <RawMetadata event={event} />
@@ -200,7 +229,7 @@ function progressIndex(events: ReviewEvent[], status: string | null): number {
   if (!latestStep) return status === "running" ? 1 : 0;
   if (["run_finished", "comment_posted", "no_findings", "run_failed"].includes(latestStep)) return 5;
   if (latestStep === "codex_finished") return 4;
-  if (latestStep.startsWith("codex_")) return 3;
+  if (latestStep.startsWith("codex_") || latestStep === "review_strategy_selected") return 3;
   if (latestStep.startsWith("workspace_")) return 2;
   if (["job_claimed", "run_started", "bot_token_loaded", "gitlab_project_resolved", "lock_acquired", "diff_fetched"].includes(latestStep)) return 1;
   return 0;
@@ -233,6 +262,10 @@ const STEP_LABELS: Record<string, string> = {
   diff_fetched: "diff 가져오기",
   workspace_checkout_started: "workspace checkout 시작",
   workspace_checkout_finished: "workspace checkout 완료",
+  review_strategy_selected: "리뷰 전략 선택",
+  codex_triage_started: "Auto triage 시작",
+  codex_triage_finished: "Auto triage 완료",
+  codex_triage_failed: "Auto triage 실패",
   codex_started: "Codex 리뷰 시작",
   codex_tool_used: "도구 사용",
   codex_message: "Codex 메시지",
@@ -258,6 +291,10 @@ const EVENT_MESSAGES: Record<string, string> = {
   diff_fetched: "GitLab diff를 가져왔습니다.",
   workspace_checkout_started: "workspace checkout을 시작했습니다.",
   workspace_checkout_finished: "workspace checkout을 완료했습니다.",
+  review_strategy_selected: "리뷰 전략과 실행 강도를 선택했습니다.",
+  codex_triage_started: "Auto 전략이 본 리뷰 강도를 판단하고 있습니다.",
+  codex_triage_finished: "Auto triage가 본 리뷰 강도를 선택했습니다.",
+  codex_triage_failed: "Auto triage가 실패해 안전 기본값으로 진행합니다.",
   codex_started: "Codex 리뷰가 시작되었습니다.",
   codex_finished: "Codex 리뷰가 완료되었습니다.",
   comment_posted: "GitLab 댓글을 게시했습니다.",
@@ -270,7 +307,9 @@ function reviewModelLabel(events: ReviewEvent[]): string | null {
   const metadata = events.find((event) => event.step === "codex_started")?.metadata;
   const model = metadata?.model;
   const effort = metadata?.modelReasoningEffort;
+  const strategy = metadata?.reviewStrategy;
   if (typeof model !== "string") return null;
+  if (typeof strategy === "string" && typeof effort === "string") return `${model} / ${strategy} → ${effort}`;
   return typeof effort === "string" ? `${model} / ${effort}` : model;
 }
 
@@ -287,6 +326,26 @@ function numberMetadata(event: ReviewEvent, key: string): number | null {
 function booleanMetadata(event: ReviewEvent, key: string): boolean | null {
   const value = event.metadata[key];
   return typeof value === "boolean" ? value : null;
+}
+
+function arrayMetadata(event: ReviewEvent, key: string): string[] {
+  const value = event.metadata[key];
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+function strategyLabel(strategy: string): string {
+  if (strategy === "auto") return "Auto";
+  if (strategy === "fast") return "빠름";
+  if (strategy === "balanced") return "균형";
+  if (strategy === "thorough") return "정밀";
+  return strategy;
+}
+
+function riskLevelLabel(riskLevel: string): string {
+  if (riskLevel === "low") return "낮음";
+  if (riskLevel === "medium") return "중간";
+  if (riskLevel === "high") return "높음";
+  return riskLevel;
 }
 
 function toolLabel(tool: string): string {

@@ -1,5 +1,6 @@
 export type UserRole = "admin" | "user";
 export type CodexReviewReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh";
+export type ReviewStrategy = "auto" | "fast" | "balanced" | "thorough";
 
 export type AuthStatus = {
   authenticated: boolean;
@@ -15,7 +16,7 @@ export type CodexStatus = {
   email: string | null;
   planType: string | null;
   reviewModel: string;
-  reviewReasoningEffort: string;
+  reviewStrategyMode: "project";
   managedByAdmin?: boolean;
   error?: string;
 };
@@ -35,16 +36,14 @@ export type ReviewerBotStatus = {
 
 export type CodexReviewSettings = {
   model: string;
-  reasoningEffort: CodexReviewReasoningEffort;
   isDefault: boolean;
   updatedByUserId: number | null;
   updatedAt: string | null;
   defaults: {
     model: string;
-    reasoningEffort: CodexReviewReasoningEffort;
   };
   modelPresets: string[];
-  reasoningEfforts: CodexReviewReasoningEffort[];
+  strategyMode: "project";
 };
 
 export type AdminUser = {
@@ -64,16 +63,28 @@ export type Project = {
   gitlabProjectRefId: number | null;
   gitlabProjectId: string;
   displayName: string;
+  webUrl: string | null;
   enabled: boolean;
   skipLabels: string[];
   mrTargetBranches: string[];
   commitBranches: string[];
+  reviewStrategy: ReviewStrategy;
+  reviewStrategyUpdatedByUserId: number | null;
+  reviewStrategyUpdatedAt: string | null;
+  webhookStatus: "connected" | "error" | "missing";
+  webhookUrl: string | null;
+  webhookLastVerifiedAt: string | null;
+  webhookError: string | null;
 };
 
 export type ReviewMeta = {
   model: string | null;
   reasoningEffort: string | null;
   promptVersion: string | null;
+  reviewStrategy: string | null;
+  triageUsed: boolean | null;
+  triageRiskLevel: string | null;
+  triageReason: string | null;
   inputTokens: number | null;
   outputTokens: number | null;
   reasoningTokens: number | null;
@@ -140,7 +151,7 @@ export type ReviewEvent = {
 
 export type ReviewJob = {
   id: number;
-  kind: "commit_manual" | "commit_retry" | "mr_retry" | "scan_user" | string;
+  kind: "commit_manual" | "commit_retry" | "mr_retry" | "scan_user" | "commit_webhook" | "mr_webhook" | string;
   status: "queued" | "running" | "completed" | "failed" | string;
   userId: number;
   runType: "mr" | "commit" | null;

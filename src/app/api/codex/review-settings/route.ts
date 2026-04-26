@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import {
-  CODEX_REVIEW_REASONING_EFFORTS,
   CodexReviewSettingsError,
   CodexReviewSettingsPermissionError
 } from "../../../../lib/codex-review-settings";
@@ -12,8 +11,7 @@ import { codexReviewSettings } from "../../../../lib/services";
 export const runtime = "nodejs";
 
 const settingsInput = z.object({
-  model: z.string(),
-  reasoningEffort: z.enum(CODEX_REVIEW_REASONING_EFFORTS)
+  model: z.string()
 });
 
 export async function GET() {

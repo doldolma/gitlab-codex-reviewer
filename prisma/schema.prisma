@@ -8,21 +8,21 @@ datasource db {
 }
 
 model User {
-  id           Int       @id @default(autoincrement())
-  gitlabHost   String    @map("gitlab_host")
-  gitlabUserId Int       @map("gitlab_user_id")
+  id           Int     @id @default(autoincrement())
+  gitlabHost   String  @map("gitlab_host")
+  gitlabUserId Int     @map("gitlab_user_id")
   username     String
   name         String?
-  webUrl       String?   @map("web_url")
-  role         String    @default("user")
-  createdAt    String    @map("created_at")
-  updatedAt    String    @map("updated_at")
+  webUrl       String? @map("web_url")
+  role         String  @default("user")
+  createdAt    String  @map("created_at")
+  updatedAt    String  @map("updated_at")
 
-  connection   GitlabConnection?
-  projects     Project[]
-  sessions     Session[]
+  connection       GitlabConnection?
+  projects         Project[]
+  sessions         Session[]
   commitReviewRuns CommitReviewRun[]
-  reviewJobs   ReviewJob[]
+  reviewJobs       ReviewJob[]
 
   @@unique([gitlabHost, gitlabUserId])
   @@index([gitlabHost, gitlabUserId], map: "idx_users_gitlab_identity")
@@ -81,28 +81,36 @@ model ReviewerBotConnection {
 }
 
 model CodexReviewSettings {
-  id              Int     @id @default(1)
+  id              Int    @id @default(1)
   model           String
-  reasoningEffort String  @map("reasoning_effort")
-  updatedByUserId Int?    @map("updated_by_user_id")
-  createdAt       String  @map("created_at")
-  updatedAt       String  @map("updated_at")
+  reasoningEffort String @map("reasoning_effort")
+  updatedByUserId Int?   @map("updated_by_user_id")
+  createdAt       String @map("created_at")
+  updatedAt       String @map("updated_at")
 
   @@map("codex_review_settings")
 }
 
 model GitlabProject {
-  id                 Int     @id @default(autoincrement())
-  gitlabHost         String  @map("gitlab_host")
-  gitlabProjectId    String  @map("gitlab_project_id")
-  pathWithNamespace  String? @map("path_with_namespace")
-  nameWithNamespace  String? @map("name_with_namespace")
-  webUrl             String? @map("web_url")
-  cloneHttpUrl       String? @map("clone_http_url")
-  defaultBranch      String? @map("default_branch")
-  workspaceError     String? @map("workspace_error")
-  createdAt          String  @map("created_at")
-  updatedAt          String  @map("updated_at")
+  id                     Int     @id @default(autoincrement())
+  gitlabHost             String  @map("gitlab_host")
+  gitlabProjectId        String  @map("gitlab_project_id")
+  pathWithNamespace      String? @map("path_with_namespace")
+  nameWithNamespace      String? @map("name_with_namespace")
+  webUrl                 String? @map("web_url")
+  cloneHttpUrl           String? @map("clone_http_url")
+  defaultBranch          String? @map("default_branch")
+  workspaceError         String? @map("workspace_error")
+  webhookHookId          Int?    @map("webhook_hook_id")
+  webhookSecretEncrypted String? @map("webhook_secret_encrypted")
+  webhookUrl             String? @map("webhook_url")
+  webhookLastVerifiedAt  String? @map("webhook_last_verified_at")
+  webhookError           String? @map("webhook_error")
+  reviewStrategy         String  @default("auto") @map("review_strategy")
+  reviewStrategyUpdatedByUserId Int? @map("review_strategy_updated_by_user_id")
+  reviewStrategyUpdatedAt String? @map("review_strategy_updated_at")
+  createdAt              String  @map("created_at")
+  updatedAt              String  @map("updated_at")
 
   subscriptions     Project[]
   mergeRequests     MergeRequest[]
@@ -116,22 +124,22 @@ model GitlabProject {
 }
 
 model Project {
-  id              Int    @id @default(autoincrement())
-  userId          Int    @map("user_id")
-  gitlabProjectRefId Int? @map("gitlab_project_ref_id")
-  gitlabProjectId String @map("gitlab_project_id")
-  displayName     String @map("display_name")
-  enabled         Boolean @default(true)
-  skipLabelsJson  String @default("[]") @map("skip_labels_json")
-  mrTargetBranchesJson String @default("[]") @map("mr_target_branches_json")
-  commitBranchesJson   String @default("[]") @map("commit_branches_json")
-  createdAt       String @map("created_at")
-  updatedAt       String @map("updated_at")
+  id                   Int     @id @default(autoincrement())
+  userId               Int     @map("user_id")
+  gitlabProjectRefId   Int?    @map("gitlab_project_ref_id")
+  gitlabProjectId      String  @map("gitlab_project_id")
+  displayName          String  @map("display_name")
+  enabled              Boolean @default(true)
+  skipLabelsJson       String  @default("[]") @map("skip_labels_json")
+  mrTargetBranchesJson String  @default("[]") @map("mr_target_branches_json")
+  commitBranchesJson   String  @default("[]") @map("commit_branches_json")
+  createdAt            String  @map("created_at")
+  updatedAt            String  @map("updated_at")
 
-  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
-  gitlabProject GitlabProject? @relation(fields: [gitlabProjectRefId], references: [id], onDelete: SetNull)
-  mergeRequests MergeRequest[]
-  reviewRuns    ReviewRun[]
+  user              User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  gitlabProject     GitlabProject?     @relation(fields: [gitlabProjectRefId], references: [id], onDelete: SetNull)
+  mergeRequests     MergeRequest[]
+  reviewRuns        ReviewRun[]
   branchWatchStates BranchWatchState[]
   commitReviewRuns  CommitReviewRun[]
 
@@ -142,16 +150,16 @@ model Project {
 }
 
 model BranchWatchState {
-  id          Int     @id @default(autoincrement())
-  projectId   Int     @map("project_id")
-  gitlabProjectRefId Int? @map("gitlab_project_ref_id")
-  branchName  String  @map("branch_name")
-  lastSeenSha String? @map("last_seen_sha")
-  lastError   String? @map("last_error")
-  createdAt   String  @map("created_at")
-  updatedAt   String  @map("updated_at")
+  id                 Int     @id @default(autoincrement())
+  projectId          Int     @map("project_id")
+  gitlabProjectRefId Int?    @map("gitlab_project_ref_id")
+  branchName         String  @map("branch_name")
+  lastSeenSha        String? @map("last_seen_sha")
+  lastError          String? @map("last_error")
+  createdAt          String  @map("created_at")
+  updatedAt          String  @map("updated_at")
 
-  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  project       Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
   gitlabProject GitlabProject? @relation(fields: [gitlabProjectRefId], references: [id], onDelete: Cascade)
 
   @@unique([projectId, branchName])
@@ -162,21 +170,21 @@ model BranchWatchState {
 }
 
 model MergeRequest {
-  id              Int     @id @default(autoincrement())
-  projectId       Int     @map("project_id")
-  gitlabProjectRefId Int? @map("gitlab_project_ref_id")
-  mrIid           Int     @map("mr_iid")
-  title           String
-  webUrl          String  @map("web_url")
-  authorUsername  String? @map("author_username")
-  labelsJson      String  @default("[]") @map("labels_json")
-  headSha         String? @map("head_sha")
-  state           String
-  draft           Boolean @default(false)
-  updatedAtGitlab String? @map("updated_at_gitlab")
-  observedAt      String  @map("observed_at")
+  id                 Int     @id @default(autoincrement())
+  projectId          Int     @map("project_id")
+  gitlabProjectRefId Int?    @map("gitlab_project_ref_id")
+  mrIid              Int     @map("mr_iid")
+  title              String
+  webUrl             String  @map("web_url")
+  authorUsername     String? @map("author_username")
+  labelsJson         String  @default("[]") @map("labels_json")
+  headSha            String? @map("head_sha")
+  state              String
+  draft              Boolean @default(false)
+  updatedAtGitlab    String? @map("updated_at_gitlab")
+  observedAt         String  @map("observed_at")
 
-  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  project       Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
   gitlabProject GitlabProject? @relation(fields: [gitlabProjectRefId], references: [id], onDelete: Cascade)
 
   @@unique([projectId, mrIid])
@@ -187,20 +195,20 @@ model MergeRequest {
 }
 
 model ReviewRun {
-  id               Int     @id @default(autoincrement())
-  projectId        Int     @map("project_id")
-  gitlabProjectRefId Int?  @map("gitlab_project_ref_id")
-  mrIid            Int     @map("mr_iid")
-  headSha          String  @map("head_sha")
-  status           String
-  startedAt        String  @map("started_at")
-  finishedAt       String? @map("finished_at")
-  commentId        Int?    @map("comment_id")
-  commentUrl       String? @map("comment_url")
-  findingsMarkdown String? @map("findings_markdown")
-  errorMessage     String? @map("error_message")
+  id                 Int     @id @default(autoincrement())
+  projectId          Int     @map("project_id")
+  gitlabProjectRefId Int?    @map("gitlab_project_ref_id")
+  mrIid              Int     @map("mr_iid")
+  headSha            String  @map("head_sha")
+  status             String
+  startedAt          String  @map("started_at")
+  finishedAt         String? @map("finished_at")
+  commentId          Int?    @map("comment_id")
+  commentUrl         String? @map("comment_url")
+  findingsMarkdown   String? @map("findings_markdown")
+  errorMessage       String? @map("error_message")
 
-  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  project       Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
   gitlabProject GitlabProject? @relation(fields: [gitlabProjectRefId], references: [id], onDelete: Cascade)
 
   @@unique([projectId, mrIid, headSha])
@@ -211,28 +219,28 @@ model ReviewRun {
 }
 
 model CommitReviewRun {
-  id               Int     @id @default(autoincrement())
-  userId           Int     @map("user_id")
-  projectId        Int?    @map("project_id")
-  gitlabProjectRefId Int?  @map("gitlab_project_ref_id")
-  gitlabProjectId  String  @map("gitlab_project_id")
-  branchName       String? @map("branch_name")
-  commitSha        String  @map("commit_sha")
-  commitTitle      String  @map("commit_title")
-  commitUrl        String? @map("commit_url")
-  authorName       String? @map("author_name")
-  committedDate    String? @map("committed_date")
-  trigger          String
-  status           String
-  startedAt        String  @map("started_at")
-  finishedAt       String? @map("finished_at")
-  commentId        Int?    @map("comment_id")
-  commentUrl       String? @map("comment_url")
-  findingsMarkdown String? @map("findings_markdown")
-  errorMessage     String? @map("error_message")
+  id                 Int     @id @default(autoincrement())
+  userId             Int     @map("user_id")
+  projectId          Int?    @map("project_id")
+  gitlabProjectRefId Int?    @map("gitlab_project_ref_id")
+  gitlabProjectId    String  @map("gitlab_project_id")
+  branchName         String? @map("branch_name")
+  commitSha          String  @map("commit_sha")
+  commitTitle        String  @map("commit_title")
+  commitUrl          String? @map("commit_url")
+  authorName         String? @map("author_name")
+  committedDate      String? @map("committed_date")
+  trigger            String
+  status             String
+  startedAt          String  @map("started_at")
+  finishedAt         String? @map("finished_at")
+  commentId          Int?    @map("comment_id")
+  commentUrl         String? @map("comment_url")
+  findingsMarkdown   String? @map("findings_markdown")
+  errorMessage       String? @map("error_message")
 
-  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  project Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project       Project?       @relation(fields: [projectId], references: [id], onDelete: SetNull)
   gitlabProject GitlabProject? @relation(fields: [gitlabProjectRefId], references: [id], onDelete: Cascade)
 
   @@unique([userId, gitlabProjectId, commitSha])
@@ -282,8 +290,8 @@ model ReviewJob {
 }
 
 model ReviewLock {
-  lockKey    String @id @map("lock_key")
-  acquiredAt String @map("acquired_at")
+  lockKey    String  @id @map("lock_key")
+  acquiredAt String  @map("acquired_at")
   expiresAt  String? @map("expires_at")
 
   @@map("review_locks")
