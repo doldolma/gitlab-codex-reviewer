@@ -27,7 +27,7 @@ export function ReviewRunDrawer({
   if (!mergeRequest) return null;
   return (
     <div className="drawer-backdrop" onClick={onClose}>
-      <aside className="drawer" onClick={(event) => event.stopPropagation()}>
+      <aside className="drawer review-detail-drawer" onClick={(event) => event.stopPropagation()}>
         <header>
           <div>
             <span className="eyebrow">리뷰 실행</span>
@@ -37,19 +37,21 @@ export function ReviewRunDrawer({
             <X size={18} />
           </button>
         </header>
-        <dl className="detail-list">
-          <dt>프로젝트</dt>
-          <dd>{mergeRequest.projectName}</dd>
-          <dt>Head SHA</dt>
-          <dd className="mono">{mergeRequest.headSha ?? "대기 중"}</dd>
-          <dt>상태</dt>
-          <dd>{labelForStatus(mergeRequest.reviewStatus)}</dd>
-          <dt>관측 시간</dt>
-          <dd>{new Date(mergeRequest.observedAt).toLocaleString()}</dd>
-          <dt>마지막 리뷰</dt>
-          <dd>{mergeRequest.reviewedAt ? new Date(mergeRequest.reviewedAt).toLocaleString() : "아직 없음"}</dd>
-        </dl>
-        <ReviewProgressSummary events={events.data?.events ?? []} status={mergeRequest.reviewStatus} />
+        <div className="review-detail-overview">
+          <dl className="detail-list">
+            <dt>프로젝트</dt>
+            <dd>{mergeRequest.projectName}</dd>
+            <dt>Head SHA</dt>
+            <dd className="mono">{mergeRequest.headSha ?? "대기 중"}</dd>
+            <dt>상태</dt>
+            <dd>{labelForStatus(mergeRequest.reviewStatus)}</dd>
+            <dt>관측 시간</dt>
+            <dd>{new Date(mergeRequest.observedAt).toLocaleString()}</dd>
+            <dt>마지막 리뷰</dt>
+            <dd>{mergeRequest.reviewedAt ? new Date(mergeRequest.reviewedAt).toLocaleString() : "아직 없음"}</dd>
+          </dl>
+          <ReviewProgressSummary events={events.data?.events ?? []} status={mergeRequest.reviewStatus} />
+        </div>
         {mergeRequest.reviewStatus === "canceled" && <div className="alert neutral">리뷰가 취소되었습니다.</div>}
         {mergeRequest.errorMessage && (
           <pre className="error-box">{mergeRequest.errorMessage}</pre>

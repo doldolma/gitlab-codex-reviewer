@@ -28,7 +28,7 @@ export function CommitReviewDrawer({
 
   return (
     <div className="drawer-backdrop" onClick={onClose}>
-      <aside className="drawer" onClick={(event) => event.stopPropagation()}>
+      <aside className="drawer review-detail-drawer" onClick={(event) => event.stopPropagation()}>
         <header>
           <div>
             <span className="eyebrow">커밋 리뷰</span>
@@ -38,24 +38,26 @@ export function CommitReviewDrawer({
             <X size={18} />
           </button>
         </header>
-        <dl className="detail-list">
-          <dt>프로젝트</dt>
-          <dd>{review.projectName}</dd>
-          <dt>Commit SHA</dt>
-          <dd className="mono">{review.commitSha}</dd>
-          <dt>브랜치</dt>
-          <dd>{review.branchName ?? "수동"}</dd>
-          <dt>실행 방식</dt>
-          <dd>
-            {labelForTrigger(review.trigger)}
-            {review.reviewStrategyOverride ? ` · ${labelForStrategy(review.reviewStrategyOverride)}` : ""}
-          </dd>
-          <dt>상태</dt>
-          <dd>{labelForStatus(review.status)}</dd>
-          <dt>리뷰 완료</dt>
-          <dd>{review.finishedAt ? new Date(review.finishedAt).toLocaleString() : "아직 없음"}</dd>
-        </dl>
-        <ReviewProgressSummary events={events.data?.events ?? []} status={review.status} />
+        <div className="review-detail-overview">
+          <dl className="detail-list">
+            <dt>프로젝트</dt>
+            <dd>{review.projectName}</dd>
+            <dt>Commit SHA</dt>
+            <dd className="mono">{review.commitSha}</dd>
+            <dt>브랜치</dt>
+            <dd>{review.branchName ?? "수동"}</dd>
+            <dt>실행 방식</dt>
+            <dd>
+              {labelForTrigger(review.trigger)}
+              {review.reviewStrategyOverride ? ` · ${labelForStrategy(review.reviewStrategyOverride)}` : ""}
+            </dd>
+            <dt>상태</dt>
+            <dd>{labelForStatus(review.status)}</dd>
+            <dt>리뷰 완료</dt>
+            <dd>{review.finishedAt ? new Date(review.finishedAt).toLocaleString() : "아직 없음"}</dd>
+          </dl>
+          <ReviewProgressSummary events={events.data?.events ?? []} status={review.status} />
+        </div>
         {review.status === "canceled" && <div className="alert neutral">리뷰가 취소되었습니다.</div>}
         {review.errorMessage && <pre className="error-box">{review.errorMessage}</pre>}
         {review.status === "no_findings" && (
