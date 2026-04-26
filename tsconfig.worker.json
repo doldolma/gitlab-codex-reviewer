@@ -1,0 +1,32 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "ES2022",
+    "moduleResolution": "Bundler",
+    "noEmit": false,
+    "outDir": "dist",
+    "rootDir": "src",
+    "declaration": false,
+    "jsx": "react-jsx",
+    "plugins": []
+  },
+  "include": [
+    "src/worker/**/*.ts",
+    "src/lib/codex-app-server-client.ts",
+    "src/lib/codex-auth.ts",
+    "src/lib/config.ts",
+    "src/lib/diff-formatter.ts",
+    "src/lib/gitlab-client.ts",
+    "src/lib/gitlab-oauth.ts",
+    "src/lib/git-workspace.ts",
+    "src/lib/note-publisher.ts",
+    "src/lib/prisma.ts",
+    "src/lib/prompts.ts",
+    "src/lib/review-engine.ts",
+    "src/lib/reviewer-bot.ts",
+    "src/lib/review-state.ts",
+    "src/lib/secret-store.ts",
+    "src/lib/services.ts"
+  ],
+  "exclude": ["node_modules", "dist", "src/app", "src/components", "src/lib/session.ts", "src/lib/api-client.ts"]
+}

@@ -1,0 +1,290 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           Int       @id @default(autoincrement())
+  gitlabHost   String    @map("gitlab_host")
+  gitlabUserId Int       @map("gitlab_user_id")
+  username     String
+  name         String?
+  webUrl       String?   @map("web_url")
+  role         String    @default("user")
+  createdAt    String    @map("created_at")
+  updatedAt    String    @map("updated_at")
+
+  connection   GitlabConnection?
+  projects     Project[]
+  sessions     Session[]
+  commitReviewRuns CommitReviewRun[]
+  reviewJobs   ReviewJob[]
+
+  @@unique([gitlabHost, gitlabUserId])
+  @@index([gitlabHost, gitlabUserId], map: "idx_users_gitlab_identity")
+  @@map("users")
+}
+
+model Session {
+  id        String @id
+  userId    Int    @map("user_id")
+  expiresAt String @map("expires_at")
+  createdAt String @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+}
+
+model OauthState {
+  state        String  @id
+  codeVerifier String  @map("code_verifier")
+  redirectTo   String? @map("redirect_to")
+  expiresAt    String  @map("expires_at")
+  createdAt    String  @map("created_at")
+
+  @@map("oauth_states")
+}
+
+model GitlabConnection {
+  userId                Int    @id @map("user_id")
+  gitlabHost            String @map("gitlab_host")
+  gitlabUserId          Int    @map("gitlab_user_id")
+  username              String
+  encryptedAccessToken  String @map("encrypted_access_token")
+  encryptedRefreshToken String @map("encrypted_refresh_token")
+  expiresAt             String @map("expires_at")
+  createdAt             String @map("created_at")
+  updatedAt             String @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("gitlab_connection")
+}
+
+model ReviewerBotConnection {
+  id             Int     @id @default(1)
+  gitlabHost     String  @map("gitlab_host")
+  botUserId      Int     @map("bot_user_id")
+  username       String
+  name           String?
+  encryptedToken String  @map("encrypted_token")
+  createdAt      String  @map("created_at")
+  updatedAt      String  @map("updated_at")
+  lastVerifiedAt String? @map("last_verified_at")
+
+  @@map("reviewer_bot_connection")
+}
+
+model CodexReviewSettings {
+  id              Int     @id @default(1)
+  model           String
+  reasoningEffort String  @map("reasoning_effort")
+  updatedByUserId Int?    @map("updated_by_user_id")
+  createdAt       String  @map("created_at")
+  updatedAt       String  @map("updated_at")
+
+  @@map("codex_review_settings")
+}
+
+model GitlabProject {
+  id                 Int     @id @default(autoincrement())
+  gitlabHost         String  @map("gitlab_host")
+  gitlabProjectId    String  @map("gitlab_project_id")
+  pathWithNamespace  String? @map("path_with_namespace")
+  nameWithNamespace  String? @map("name_with_namespace")
+  webUrl             String? @map("web_url")
+  cloneHttpUrl       String? @map("clone_http_url")
+  defaultBranch      String? @map("default_branch")
+  workspaceError     String? @map("workspace_error")
+  createdAt          String  @map("created_at")
+  updatedAt          String  @map("updated_at")
+
+  subscriptions     Project[]
+  mergeRequests     MergeRequest[]
+  reviewRuns        ReviewRun[]
+  branchWatchStates BranchWatchState[]
+  commitReviewRuns  CommitReviewRun[]
+
+  @@unique([gitlabHost, gitlabProjectId])
+  @@index([gitlabHost], map: "idx_gitlab_projects_host")
+  @@map("gitlab_projects")
+}
+
+model Project {
+  id              Int    @id @default(autoincrement())
+  userId          Int    @map("user_id")
+  gitlabProjectRefId Int? @map("gitlab_project_ref_id")
+  gitlabProjectId String @map("gitlab_project_id")
+  displayName     String @map("display_name")
+  enabled         Boolean @default(true)
+  skipLabelsJson  String @default("[]") @map("skip_labels_json")
+  mrTargetBranchesJson String @default("[]") @map("mr_target_branches_json")
+  commitBranchesJson   String @default("[]") @map("commit_branches_json")
+  createdAt       String @map("created_at")
+  updatedAt       String @map("updated_at")
+
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  gitlabProject GitlabProject? @relation(fields: [gitlabProjectRefId], references: [id], onDelete: SetNull)
+  mergeRequests MergeRequest[]
+  reviewRuns    ReviewRun[]
+  branchWatchStates BranchWatchState[]
+  commitReviewRuns  CommitReviewRun[]
+
+  @@unique([userId, gitlabProjectId])
+  @@index([userId], map: "idx_projects_user")
+  @@index([gitlabProjectRefId], map: "idx_projects_gitlab_project_ref")
+  @@map("projects")
+}
+
+model BranchWatchState {
+  id          Int     @id @default(autoincrement())
+  projectId   Int     @map("project_id")
+  gitlabProjectRefId Int? @map("gitlab_project_ref_id")
+  branchName  String  @map("branch_name")
+  lastSeenSha String? @map("last_seen_sha")
+  lastError   String? @map("last_error")
+  createdAt   String  @map("created_at")
+  updatedAt   String  @map("updated_at")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  gitlabProject GitlabProject? @relation(fields: [gitlabProjectRefId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, branchName])
+  @@unique([gitlabProjectRefId, branchName])
+  @@index([projectId], map: "idx_branch_watch_states_project")
+  @@index([gitlabProjectRefId], map: "idx_branch_watch_states_gitlab_project")
+  @@map("branch_watch_states")
+}
+
+model MergeRequest {
+  id              Int     @id @default(autoincrement())
+  projectId       Int     @map("project_id")
+  gitlabProjectRefId Int? @map("gitlab_project_ref_id")
+  mrIid           Int     @map("mr_iid")
+  title           String
+  webUrl          String  @map("web_url")
+  authorUsername  String? @map("author_username")
+  labelsJson      String  @default("[]") @map("labels_json")
+  headSha         String? @map("head_sha")
+  state           String
+  draft           Boolean @default(false)
+  updatedAtGitlab String? @map("updated_at_gitlab")
+  observedAt      String  @map("observed_at")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  gitlabProject GitlabProject? @relation(fields: [gitlabProjectRefId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, mrIid])
+  @@unique([gitlabProjectRefId, mrIid])
+  @@index([projectId], map: "idx_merge_requests_project")
+  @@index([gitlabProjectRefId], map: "idx_merge_requests_gitlab_project")
+  @@map("merge_requests")
+}
+
+model ReviewRun {
+  id               Int     @id @default(autoincrement())
+  projectId        Int     @map("project_id")
+  gitlabProjectRefId Int?  @map("gitlab_project_ref_id")
+  mrIid            Int     @map("mr_iid")
+  headSha          String  @map("head_sha")
+  status           String
+  startedAt        String  @map("started_at")
+  finishedAt       String? @map("finished_at")
+  commentId        Int?    @map("comment_id")
+  commentUrl       String? @map("comment_url")
+  findingsMarkdown String? @map("findings_markdown")
+  errorMessage     String? @map("error_message")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  gitlabProject GitlabProject? @relation(fields: [gitlabProjectRefId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, mrIid, headSha])
+  @@unique([gitlabProjectRefId, mrIid, headSha])
+  @@index([status], map: "idx_review_runs_status")
+  @@index([gitlabProjectRefId], map: "idx_review_runs_gitlab_project")
+  @@map("review_runs")
+}
+
+model CommitReviewRun {
+  id               Int     @id @default(autoincrement())
+  userId           Int     @map("user_id")
+  projectId        Int?    @map("project_id")
+  gitlabProjectRefId Int?  @map("gitlab_project_ref_id")
+  gitlabProjectId  String  @map("gitlab_project_id")
+  branchName       String? @map("branch_name")
+  commitSha        String  @map("commit_sha")
+  commitTitle      String  @map("commit_title")
+  commitUrl        String? @map("commit_url")
+  authorName       String? @map("author_name")
+  committedDate    String? @map("committed_date")
+  trigger          String
+  status           String
+  startedAt        String  @map("started_at")
+  finishedAt       String? @map("finished_at")
+  commentId        Int?    @map("comment_id")
+  commentUrl       String? @map("comment_url")
+  findingsMarkdown String? @map("findings_markdown")
+  errorMessage     String? @map("error_message")
+
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  gitlabProject GitlabProject? @relation(fields: [gitlabProjectRefId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, gitlabProjectId, commitSha])
+  @@unique([gitlabProjectRefId, commitSha])
+  @@index([userId], map: "idx_commit_review_runs_user")
+  @@index([projectId], map: "idx_commit_review_runs_project")
+  @@index([gitlabProjectRefId], map: "idx_commit_review_runs_gitlab_project")
+  @@index([status], map: "idx_commit_review_runs_status")
+  @@map("commit_review_runs")
+}
+
+model ReviewEvent {
+  id           Int    @id @default(autoincrement())
+  runType      String @map("run_type")
+  runId        Int    @map("run_id")
+  level        String
+  step         String
+  message      String
+  metadataJson String @default("{}") @map("metadata_json")
+  createdAt    String @map("created_at")
+
+  @@index([runType, runId, createdAt], map: "idx_review_events_run")
+  @@map("review_events")
+}
+
+model ReviewJob {
+  id           Int     @id @default(autoincrement())
+  kind         String
+  status       String
+  userId       Int     @map("user_id")
+  runType      String? @map("run_type")
+  runId        Int?    @map("run_id")
+  payloadJson  String  @default("{}") @map("payload_json")
+  attempts     Int     @default(0)
+  errorMessage String? @map("error_message")
+  createdAt    String  @map("created_at")
+  updatedAt    String  @map("updated_at")
+  startedAt    String? @map("started_at")
+  finishedAt   String? @map("finished_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([status, createdAt], map: "idx_review_jobs_status_created")
+  @@index([userId], map: "idx_review_jobs_user")
+  @@index([runType, runId], map: "idx_review_jobs_run")
+  @@map("review_jobs")
+}
+
+model ReviewLock {
+  lockKey    String @id @map("lock_key")
+  acquiredAt String @map("acquired_at")
+  expiresAt  String? @map("expires_at")
+
+  @@map("review_locks")
+}

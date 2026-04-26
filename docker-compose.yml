@@ -1,0 +1,36 @@
+name: gitlab-codex-reviewer
+
+x-app: &app
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: gitlab-codex-reviewer:latest
+  env_file:
+    - .env.prod
+  volumes:
+    - gitlab-codex-reviewer-data:/app/.data
+
+services:
+  web:
+    <<: *app
+    command: sh -c "npm run db:deploy && node .next/standalone/server.js"
+    ports:
+      - "${HOST_PORT:-3000}:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:3000/api/health >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+
+  worker:
+    <<: *app
+    command: npm run start:worker
+    depends_on:
+      web:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  gitlab-codex-reviewer-data:

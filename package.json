@@ -1,0 +1,44 @@
+{
+  "name": "gitlab-codex-reviewer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "npm run db:deploy && concurrently -n web,worker \"node scripts/next-cli.mjs dev\" \"npm run dev:worker\"",
+    "dev:web": "npm run db:deploy && node scripts/next-cli.mjs dev",
+    "dev:worker": "tsx watch src/worker/index.ts",
+    "prisma:generate": "node scripts/prisma-cli.mjs generate",
+    "db:deploy": "node scripts/prisma-cli.mjs migrate deploy",
+    "db:clear-review-history": "node scripts/clear-review-history.mjs",
+    "build": "npm run prisma:generate && next build && tsc -p tsconfig.worker.json && node scripts/fix-worker-imports.mjs",
+    "start:web": "npm run db:deploy && node scripts/next-cli.mjs start",
+    "start:worker": "node dist/worker/index.js",
+    "start": "npm run start:web",
+    "test": "vitest run src",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.worker.json --noEmit"
+  },
+  "dependencies": {
+    "@openai/codex-sdk": "^0.125.0",
+    "@prisma/client": "^6.19.3",
+    "@tanstack/react-query": "^5.90.12",
+    "dotenv": "^17.4.2",
+    "lucide-react": "^0.555.0",
+    "next": "^16.0.7",
+    "prisma": "^6.19.0",
+    "react": "^19.2.1",
+    "react-dom": "^19.2.1",
+    "zod": "^4.1.13"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "concurrently": "^9.2.1",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.14"
+  },
+  "overrides": {
+    "postcss": "8.5.10"
+  }
+}

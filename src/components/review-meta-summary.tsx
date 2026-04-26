@@ -1,0 +1,38 @@
+import type { ReviewMeta } from "../lib/api-client";
+
+export function ReviewMetaSummary({ meta }: { meta: ReviewMeta | null }) {
+  if (!meta || !hasReviewMeta(meta)) {
+    return <span className="subtle">-</span>;
+  }
+
+  return (
+    <div className="review-meta-summary">
+      {(meta.model || meta.reasoningEffort) && (
+        <span>
+          {meta.model ?? "Codex"}
+          {meta.reasoningEffort ? ` · ${meta.reasoningEffort}` : ""}
+        </span>
+      )}
+      {meta.totalTokens !== null && <span>토큰 {formatCompactNumber(meta.totalTokens)}</span>}
+      {meta.reasoningTokens !== null && <span>이성 {formatCompactNumber(meta.reasoningTokens)}</span>}
+    </div>
+  );
+}
+
+function hasReviewMeta(meta: ReviewMeta): boolean {
+  return Boolean(
+    meta.model ||
+      meta.reasoningEffort ||
+      meta.promptVersion ||
+      meta.inputTokens !== null ||
+      meta.outputTokens !== null ||
+      meta.reasoningTokens !== null ||
+      meta.totalTokens !== null
+  );
+}
+
+function formatCompactNumber(value: number): string {
+  if (value < 1000) return value.toLocaleString();
+  if (value < 1_000_000) return `${(value / 1000).toFixed(value >= 10_000 ? 0 : 1)}k`;
+  return `${(value / 1_000_000).toFixed(1)}m`;
+}
