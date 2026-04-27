@@ -274,6 +274,15 @@ export class GitLabClient {
     );
   }
 
+  async listCommitDiscussions(projectId: string, sha: string): Promise<GitLabDiscussion[]> {
+    return this.paginate<GitLabDiscussion>(
+      `/api/v4/projects/${encodeProjectId(projectId)}/repository/commits/${encodeURIComponent(sha)}/discussions`,
+      {
+        per_page: "100"
+      }
+    );
+  }
+
   async createCommitComment(projectId: string, sha: string, note: string): Promise<GitLabCommitComment> {
     return this.request<GitLabCommitComment>(
       `/api/v4/projects/${encodeProjectId(projectId)}/repository/commits/${encodeURIComponent(sha)}/comments`,

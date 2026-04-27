@@ -105,6 +105,23 @@ describe("GitLabClient discovery helpers", () => {
     expect(commits[0]?.id).toBe("abc123");
   });
 
+  it("lists commit discussions with encoded project paths and commit shas", async () => {
+    const fetchMock = vi.fn(async (url: URL | RequestInfo) => {
+      const requestUrl = new URL(String(url));
+      expect(requestUrl.pathname).toBe("/api/v4/projects/group%2Freviewer/repository/commits/feature%2Fabc/discussions");
+      expect(requestUrl.searchParams.get("per_page")).toBe("100");
+      return new Response(JSON.stringify([{ id: "discussion-1", notes: [{ id: 42, body: "review" }] }]), {
+        status: 200,
+        headers: { "x-next-page": "" }
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const discussions = await new GitLabClient(connection).listCommitDiscussions("group/reviewer", "feature/abc");
+
+    expect(discussions[0]?.notes[0]?.id).toBe(42);
+  });
+
   it("creates project webhooks with push and merge request events enabled", async () => {
     const fetchMock = vi.fn(async (url: URL | RequestInfo, init?: RequestInit) => {
       const requestUrl = new URL(String(url));

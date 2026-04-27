@@ -8,6 +8,7 @@ import { CommitReviewDrawer } from "../../components/commit-review-drawer";
 import { BranchCombobox, CommitCombobox, GitLabProjectCombobox } from "../../components/gitlab-combobox";
 import { ReviewMetaSummary } from "../../components/review-meta-summary";
 import { apiGet, apiSend, type CommitReview, type ReviewJob, type ReviewStrategy } from "../../lib/api-client";
+import { commitReviewExternalLink } from "../../lib/review-links";
 
 export default function CommitReviewsPage() {
   const queryClient = useQueryClient();
@@ -152,64 +153,26 @@ export default function CommitReviewsPage() {
             <table>
               <thead>
                 <tr>
-                    <th>커밋</th>
-                    <th>프로젝트</th>
-                    <th>브랜치</th>
-                    <th>실행 방식</th>
-                    <th>상태</th>
-                    <th>Codex</th>
-                    <th>리뷰 완료</th>
+                  <th>커밋</th>
+                  <th>프로젝트</th>
+                  <th>브랜치</th>
+                  <th>실행 방식</th>
+                  <th>상태</th>
+                  <th>Codex</th>
+                  <th>리뷰 완료</th>
                   <th />
                 </tr>
               </thead>
               <tbody>
                 {reviews.map((review) => (
-                  <tr key={review.id} onClick={() => setSelected(review)} className="clickable">
-                    <td>
-                      <strong>{review.commitTitle || review.commitSha.slice(0, 10)}</strong>
-                      <span className="subtle mono">{review.commitSha.slice(0, 12)}</span>
-                    </td>
-                    <td>{review.projectName}</td>
-                    <td>{review.branchName ?? "수동"}</td>
-                    <td>{labelForTrigger(review.trigger)}</td>
-                    <td>
-                      <span className={`status ${statusClass(review.status)}`}>{labelForStatus(review.status)}</span>
-                    </td>
-                    <td>
-                      <ReviewMetaSummary meta={review.reviewMeta} />
-                    </td>
-                    <td>{review.finishedAt ? new Date(review.finishedAt).toLocaleString() : "아직 없음"}</td>
-                    <td className="right" onClick={(event) => event.stopPropagation()}>
-                      <div className="button-row end">
-                        {review.commentUrl && (
-                          <a
-                            className="icon-button"
-                            href={review.commentUrl}
-                            target="_blank"
-                            rel="noreferrer"
-                            title="리뷰 댓글 열기"
-                          >
-                            <ExternalLink size={16} />
-                          </a>
-                        )}
-                        {review.commitUrl && (
-                          <a className="icon-button" href={review.commitUrl} target="_blank" rel="noreferrer" title="커밋 열기">
-                            <ExternalLink size={16} />
-                          </a>
-                        )}
-                        {review.status === "failed" && (
-                          <button className="icon-button" onClick={() => retry.mutate(review.id)} title="리뷰 재시도">
-                            <RotateCcw size={16} />
-                          </button>
-                        )}
-                        {isActiveStatus(review.status) && (
-                          <button className="icon-button" onClick={() => cancel.mutate(review.id)} disabled={cancel.isPending} title="리뷰 취소">
-                            <XCircle size={16} />
-                          </button>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
+                  <CommitReviewRow
+                    key={review.id}
+                    review={review}
+                    onSelect={setSelected}
+                    onRetry={(runId) => retry.mutate(runId)}
+                    onCancel={(runId) => cancel.mutate(runId)}
+                    isCanceling={cancel.isPending}
+                  />
                 ))}
                 {!reviews.length && (
                   <tr>
@@ -230,6 +193,60 @@ export default function CommitReviewsPage() {
         />
       </div>
     </AppShell>
+  );
+}
+
+function CommitReviewRow({
+  review,
+  onSelect,
+  onRetry,
+  onCancel,
+  isCanceling
+}: {
+  review: CommitReview;
+  onSelect: (review: CommitReview) => void;
+  onRetry: (runId: number) => void;
+  onCancel: (runId: number) => void;
+  isCanceling: boolean;
+}) {
+  const externalLink = commitReviewExternalLink(review);
+
+  return (
+    <tr onClick={() => onSelect(review)} className="clickable">
+      <td>
+        <strong>{review.commitTitle || review.commitSha.slice(0, 10)}</strong>
+        <span className="subtle mono">{review.commitSha.slice(0, 12)}</span>
+      </td>
+      <td>{review.projectName}</td>
+      <td>{review.branchName ?? "수동"}</td>
+      <td>{labelForTrigger(review.trigger)}</td>
+      <td>
+        <span className={`status ${statusClass(review.status)}`}>{labelForStatus(review.status)}</span>
+      </td>
+      <td>
+        <ReviewMetaSummary meta={review.reviewMeta} />
+      </td>
+      <td>{review.finishedAt ? new Date(review.finishedAt).toLocaleString() : "아직 없음"}</td>
+      <td className="right" onClick={(event) => event.stopPropagation()}>
+        <div className="button-row end">
+          {externalLink && (
+            <a className="icon-button" href={externalLink.href} target="_blank" rel="noreferrer" title={externalLink.title}>
+              <ExternalLink size={16} />
+            </a>
+          )}
+          {review.status === "failed" && (
+            <button className="icon-button" onClick={() => onRetry(review.id)} title="리뷰 재시도">
+              <RotateCcw size={16} />
+            </button>
+          )}
+          {isActiveStatus(review.status) && (
+            <button className="icon-button" onClick={() => onCancel(review.id)} disabled={isCanceling} title="리뷰 취소">
+              <XCircle size={16} />
+            </button>
+          )}
+        </div>
+      </td>
+    </tr>
   );
 }
 

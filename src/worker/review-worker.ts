@@ -986,7 +986,7 @@ export class ReviewWorker {
       });
       if (!result.hasFindings) {
         await ensureNotCanceled(signal, checkCancellation);
-        const comment = await publishReviewNote(client, project.gitlabProjectId, mr.iid, headSha, result.markdown);
+        const comment = await publishReviewNote(client, project.gitlabProjectId, mr.iid, headSha, result.markdown, mr.web_url);
         await this.state.finishNoFindings(runId, result.markdown, comment, result.structured);
         await this.recordEvent(context, "info", "no_findings", "Codex completed with no actionable findings; summary comment was posted to GitLab.");
         await this.recordEvent(context, "info", "comment_posted", "GitLab MR review summary comment posted.", {
@@ -1003,7 +1003,7 @@ export class ReviewWorker {
         ...result.structured.potentialIssues
       ]);
       await ensureNotCanceled(signal, checkCancellation);
-      const comment = await publishReviewNote(client, project.gitlabProjectId, mr.iid, headSha, result.markdown);
+      const comment = await publishReviewNote(client, project.gitlabProjectId, mr.iid, headSha, result.markdown, mr.web_url);
       await this.state.finishCommented(runId, comment, result.markdown, result.structured);
       await this.recordEvent(context, "info", "comment_posted", "GitLab MR review comment posted.", {
         commentId: comment.id,
@@ -1082,7 +1082,7 @@ export class ReviewWorker {
       });
       if (!result.hasFindings) {
         await ensureNotCanceled(signal, checkCancellation);
-        const comment = await publishReviewNote(client, gitlabProject.gitlabProjectId, mr.iid, headSha, result.markdown);
+        const comment = await publishReviewNote(client, gitlabProject.gitlabProjectId, mr.iid, headSha, result.markdown, mr.web_url);
         await this.state.finishNoFindings(runId, result.markdown, comment, result.structured);
         await this.recordEvent(context, "info", "no_findings", "Codex completed with no actionable findings; summary comment was posted to GitLab.");
         await this.recordEvent(context, "info", "comment_posted", "GitLab MR review summary comment posted.", {
@@ -1099,7 +1099,7 @@ export class ReviewWorker {
         ...result.structured.potentialIssues
       ]);
       await ensureNotCanceled(signal, checkCancellation);
-      const comment = await publishReviewNote(client, gitlabProject.gitlabProjectId, mr.iid, headSha, result.markdown);
+      const comment = await publishReviewNote(client, gitlabProject.gitlabProjectId, mr.iid, headSha, result.markdown, mr.web_url);
       await this.state.finishCommented(runId, comment, result.markdown, result.structured);
       await this.recordEvent(context, "info", "comment_posted", "GitLab MR review comment posted.", {
         commentId: comment.id,
@@ -1174,7 +1174,7 @@ export class ReviewWorker {
       });
       if (!result.hasFindings) {
         await ensureNotCanceled(signal, checkCancellation);
-        const comment = await publishCommitReviewNote(client, gitlabProjectId, commit.id, result.markdown);
+        const comment = await publishCommitReviewNote(client, gitlabProjectId, commit.id, result.markdown, commit.web_url);
         await this.state.finishCommitNoFindings(runId, result.markdown, comment, result.structured);
         await this.recordEvent(context, "info", "no_findings", "Codex completed with no actionable findings; summary comment was posted to GitLab.");
         await this.recordEvent(context, "info", "comment_posted", "GitLab commit review summary comment posted.", {
@@ -1186,7 +1186,7 @@ export class ReviewWorker {
       }
 
       await ensureNotCanceled(signal, checkCancellation);
-      const comment = await publishCommitReviewNote(client, gitlabProjectId, commit.id, result.markdown);
+      const comment = await publishCommitReviewNote(client, gitlabProjectId, commit.id, result.markdown, commit.web_url);
       await this.state.finishCommitCommented(runId, comment, result.markdown, result.structured);
       await this.recordEvent(context, "info", "comment_posted", "GitLab commit review comment posted.", {
         commentId: comment.id,
@@ -1284,7 +1284,7 @@ export class ReviewWorker {
       });
       if (!result.hasFindings) {
         await ensureNotCanceled(signal, checkCancellation);
-        const comment = await publishCommitReviewNote(client, gitlabProject.gitlabProjectId, commit.id, result.markdown);
+        const comment = await publishCommitReviewNote(client, gitlabProject.gitlabProjectId, commit.id, result.markdown, commit.web_url);
         await this.state.finishCommitNoFindings(runId, result.markdown, comment, result.structured);
         await this.recordEvent(context, "info", "no_findings", "Codex completed with no actionable findings; summary comment was posted to GitLab.");
         await this.recordEvent(context, "info", "comment_posted", "GitLab commit review summary comment posted.", {
@@ -1296,7 +1296,7 @@ export class ReviewWorker {
       }
 
       await ensureNotCanceled(signal, checkCancellation);
-      const comment = await publishCommitReviewNote(client, gitlabProject.gitlabProjectId, commit.id, result.markdown);
+      const comment = await publishCommitReviewNote(client, gitlabProject.gitlabProjectId, commit.id, result.markdown, commit.web_url);
       await this.state.finishCommitCommented(runId, comment, result.markdown, result.structured);
       await this.recordEvent(context, "info", "comment_posted", "GitLab commit review comment posted.", {
         commentId: comment.id,
