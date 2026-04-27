@@ -772,6 +772,34 @@ describe("multi-user review state", () => {
     await db.$disconnect();
   });
 
+  it("reconstructs merge request comment links from legacy comment ids", async () => {
+    const db = await testDb();
+    const state = new ReviewStateStore(db);
+    const userId = await insertTestUser(db, { gitlabUserId: 1, username: "alice" });
+    const project = await state.createProject(userId, {
+      gitlabProjectId: "group/service",
+      displayName: "Service",
+      enabled: true,
+      skipLabels: []
+    });
+    await state.upsertMergeRequest(project.id, {
+      iid: 7,
+      title: "MR",
+      web_url: "https://gitlab.example.com/group/service/-/merge_requests/7",
+      sha: "abc123",
+      labels: [],
+      draft: false,
+      state: "opened",
+      updated_at: new Date().toISOString()
+    });
+    const runId = await state.startRun(project.id, 7, "abc123");
+    await state.finishCommented(runId, { id: 123, url: null }, "review markdown", null);
+
+    const rows = await state.listMergeRequestViews(userId);
+    expect(rows[0]?.commentUrl).toBe("https://gitlab.example.com/group/service/-/merge_requests/7#note_123");
+    await db.$disconnect();
+  });
+
   it("stores review events with team-wide access and sanitized metadata", async () => {
     const db = await testDb();
     const state = new ReviewStateStore(db);

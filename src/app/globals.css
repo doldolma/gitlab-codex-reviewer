@@ -693,6 +693,7 @@ code {
 .status {
   display: inline-flex;
   align-items: center;
+  gap: 5px;
   min-height: 26px;
   border-radius: 999px;
   padding: 0 10px;

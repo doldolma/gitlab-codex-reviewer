@@ -1752,12 +1752,26 @@ function mergeRequestViewFromRow(row: MergeRequest, project: Project, run: Revie
     reviewRunId: run?.id ?? null,
     reviewStatus: run?.status ?? null,
     reviewedAt: run?.finishedAt ?? null,
-    commentUrl: run?.commentUrl ?? null,
+    commentUrl: mrReviewCommentUrl(row.webUrl, run),
     findingsMarkdown: run?.findingsMarkdown ?? null,
     structuredReview: parseStructuredReviewJson(run?.structuredReviewJson ?? null),
     errorMessage: run?.errorMessage ?? null,
     reviewMeta
   };
+}
+
+function mrReviewCommentUrl(baseWebUrl: string, run: ReviewRun | null): string | null {
+  if (!run) return null;
+  if (run.commentUrl) return run.commentUrl;
+  if (run.commentId === null) return null;
+  try {
+    const url = new URL(baseWebUrl);
+    url.hash = `note_${run.commentId}`;
+    return url.toString();
+  } catch {
+    const withoutHash = baseWebUrl.split("#")[0];
+    return `${withoutHash}#note_${run.commentId}`;
+  }
 }
 
 function commitReviewRunFromRow(
