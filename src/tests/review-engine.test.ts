@@ -73,7 +73,7 @@ describe("CodexReviewEngine", () => {
             severity: "high",
             confidence: 0.92,
             category: "bug",
-            file: "src/handler.ts",
+            file: "apps/api/src/main/java/com/gridwiz/derems/apps/api/alarm/controller/v1/AlarmHistoryController.java",
             line: 42,
             details: "새 호출 경로가 null을 전달할 수 있지만 방어 코드가 없습니다.",
             impact: "런타임에서 요청 처리 중 예외가 발생할 수 있습니다.",
@@ -93,8 +93,14 @@ describe("CodexReviewEngine", () => {
 
     expect(result.hasFindings).toBe(true);
     expect(result.markdown).toContain("### :rotating_light: 주요 이슈");
-    expect(result.markdown).toContain("Null input can crash handler");
-    expect(result.markdown).toContain("src/handler.ts:42");
+    expect(result.markdown).toContain("#### 1. [높음] Null input can crash handler");
+    expect(result.markdown).toContain("| 항목 | 내용 |");
+    expect(result.markdown).toContain("| 분류 | 버그 |");
+    expect(result.markdown).toContain("| 신뢰도 | 92% |");
+    expect(result.markdown).toContain("| 위치 | `controller/v1/AlarmHistoryController.java:42` |");
+    expect(result.markdown).toContain("<summary>전체 경로</summary>");
+    expect(result.markdown).toContain("`apps/api/src/main/java/com/gridwiz/derems/apps/api/alarm/controller/v1/AlarmHistoryController.java:42`");
+    expect(result.markdown).not.toContain("| 심각도 | 분류 | 위치 | 이슈 | 영향 | 권장 조치 | 신뢰도 |");
   });
 
   it("uses runtime review settings when provided", async () => {
@@ -261,6 +267,8 @@ describe("CodexReviewEngine", () => {
     expect(markdown).toContain("파이프 문자를 포함한 요약 \\| 도 안전하게 표시됩니다.");
     expect(markdown).toContain("src/service\\|core.ts");
     expect(markdown).toContain("여러 줄<br>요약을 표 안에서 표시합니다.");
+    expect(markdown).toContain("### :rotating_light: 주요 이슈\n> 없음.");
+    expect(markdown).toContain("### :warning: 잠재 이슈\n> 없음.");
     expect(markdown).toContain("### :twisted_rightwards_arrows: 흐름 요약");
     expect(markdown).not.toContain("```mermaid");
   });

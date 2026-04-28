@@ -423,19 +423,57 @@ function renderChangedFilesTable(values: ChangedFileSummary[]): string {
 }
 
 function renderIssuesTable(issues: ReviewIssue[]): string {
-  if (!issues.length) return renderEmptyTable("없음.");
-  return renderTable(
-    ["심각도", "분류", "위치", "이슈", "영향", "권장 조치", "신뢰도"],
-    issues.map((issue) => [
-      severityLabel(issue.severity),
-      categoryLabel(issue.category),
-      issue.file ? `\`${issue.file}${issue.line ? `:${issue.line}` : ""}\`` : "-",
-      `${issue.title}<br>${issue.details}`,
-      issue.impact,
-      issue.recommendation,
-      `${Math.round(issue.confidence * 100)}%`
-    ])
-  );
+  if (!issues.length) return "> 없음.";
+  return issues.map(renderIssueCard).join("\n\n");
+}
+
+function renderIssueCard(issue: ReviewIssue, index: number): string {
+  const location = renderIssueLocation(issue);
+  const rows = [
+    ["분류", categoryLabel(issue.category)],
+    ["신뢰도", `${Math.round(issue.confidence * 100)}%`],
+    ["위치", location.short],
+    ["이슈", issue.details],
+    ["영향", issue.impact],
+    ["권장 조치", issue.recommendation]
+  ];
+  const sections = [
+    `#### ${index + 1}. [${severityLabel(issue.severity)}] ${markdownText(issue.title)}`,
+    "",
+    renderTable(["항목", "내용"], rows)
+  ];
+
+  if (location.full) {
+    sections.push(
+      "",
+      "<details>",
+      "<summary>전체 경로</summary>",
+      "",
+      location.full,
+      "",
+      "</details>"
+    );
+  }
+
+  return sections.join("\n");
+}
+
+function renderIssueLocation(issue: ReviewIssue): { short: string; full: string | null } {
+  if (!issue.file) return { short: "-", full: null };
+  const fullPath = locationText(issue.file, issue.line);
+  const shortPath = locationText(shortenPath(issue.file), issue.line);
+  const full = fullPath === shortPath ? null : inlineCode(fullPath);
+  return { short: inlineCode(shortPath), full };
+}
+
+function locationText(path: string, line: number | null): string {
+  return line ? `${path}:${line}` : path;
+}
+
+function shortenPath(path: string): string {
+  const parts = path.split("/").filter(Boolean);
+  if (parts.length <= 3) return path;
+  return parts.slice(-3).join("/");
 }
 
 function renderStringTable(values: string[], emptyMessage: string): string {
@@ -466,8 +504,16 @@ function renderTable(headers: string[], rows: string[][]): string {
 }
 
 function tableCell(value: string): string {
+  return markdownText(value);
+}
+
+function markdownText(value: string): string {
   const text = value.trim() || "-";
   return text.replace(/\|/g, "\\|").replace(/\r?\n/g, "<br>");
+}
+
+function inlineCode(value: string): string {
+  return `\`${value.replace(/`/g, "'")}\``;
 }
 
 function stripJsonFence(raw: string): string {
