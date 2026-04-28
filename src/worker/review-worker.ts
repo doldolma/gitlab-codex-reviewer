@@ -1,4 +1,5 @@
 import type { GitLabOAuthService } from "../lib/gitlab-oauth";
+import type { GitLabConnection } from "../lib/gitlab-oauth";
 import type { AppConfig } from "../lib/config";
 import { defaultModelSettings, runtimeSettings, type CodexReviewModelSettings, type CodexReviewRuntimeSettings } from "../lib/codex-review-settings";
 import { CodexReviewEngine, type Reviewer } from "../lib/review-engine";
@@ -23,6 +24,7 @@ import {
   type GitlabProjectRow,
   type ProjectRow,
   type ReviewEventLevel,
+  type ReviewEventRunType,
   type ReviewJobView,
   type ReviewRunRow,
   type ReviewRunType,
@@ -36,12 +38,22 @@ type ReviewSettingsProvider = {
 };
 type EventContext = {
   source: ReviewLogSource;
-  runType: ReviewRunType;
+  runType: ReviewEventRunType;
   runId: number;
   project: string;
   sha: string;
 };
 type CancellationCheck = () => Promise<void>;
+type ProjectJobResources = {
+  botConnection: GitLabConnection;
+  client: GitLabClient;
+  sharedProject: GitlabProjectRow;
+};
+type EventContextSeed = {
+  runType: ReviewEventRunType;
+  runId: number;
+  sha: string;
+};
 
 const REVIEW_JOB_HEARTBEAT_MS = 30_000;
 const STALE_REVIEW_JOB_MS = 2 * 60_000;
@@ -400,6 +412,51 @@ export class ReviewWorker {
     }
   }
 
+  private async withProjectJobLock(
+    job: ReviewJobView,
+    gitlabProjectRefId: number,
+    contextSeed: EventContextSeed | null,
+    checkCancellation: CancellationCheck | undefined,
+    action: (resources: ProjectJobResources, context: EventContext | null) => Promise<"processed" | "deferred">,
+    busyMessage = "Project review is already running."
+  ): Promise<"processed" | "deferred"> {
+    await ensureNotCanceled(undefined, checkCancellation);
+    const botConnection = await this.reviewerBot.getConnection();
+    if (!botConnection) throw new Error("Reviewer bot token is not connected");
+    const client = new GitLabClient(botConnection);
+    const sharedProject = await this.state.getGitlabProject(gitlabProjectRefId);
+    const context = contextSeed
+      ? {
+          source: "worker" as const,
+          runType: contextSeed.runType,
+          runId: contextSeed.runId,
+          project: sharedProject.gitlabProjectId,
+          sha: contextSeed.sha
+        }
+      : null;
+
+    if (context) {
+      await this.recordEvent(context, "info", "bot_token_loaded", "Reviewer Bot token loaded for GitLab review actions.");
+      await this.recordEvent(context, "info", "gitlab_project_resolved", "GitLab project metadata resolved.", {
+        pathWithNamespace: sharedProject.pathWithNamespace,
+        defaultBranch: sharedProject.defaultBranch
+      });
+    }
+
+    const projectLockKey = projectLockKeyFor(sharedProject);
+    if (!(await this.state.acquireLock(projectLockKey))) {
+      await this.requeueBusyJob(job, busyMessage, checkCancellation, context ?? undefined);
+      return "deferred";
+    }
+
+    try {
+      if (context) await this.recordEvent(context, "info", "project_lock_acquired", "Project lock acquired.");
+      return await action({ botConnection, client, sharedProject }, context);
+    } finally {
+      await this.state.releaseLock(projectLockKey);
+    }
+  }
+
   private async executeReleaseNoteJob(job: ReviewJobView, signal?: AbortSignal, checkCancellation?: CancellationCheck): Promise<"processed" | "deferred"> {
     await ensureNotCanceled(signal, checkCancellation);
     const releaseNoteId = numberFromPayload(job.payload, "releaseNoteId");
@@ -409,85 +466,171 @@ export class ReviewWorker {
     const releaseNote = await this.state.getReleaseNote(releaseNoteId);
     if (!releaseNote) throw new Error("Release note was not found");
     const gitlabProjectRefId = numberFromPayload(job.payload, "gitlabProjectRefId") ?? releaseNote.gitlabProjectRefId;
-    const sharedProject = await this.state.getGitlabProject(gitlabProjectRefId);
-    const lockKey = `release-note:${sharedProject.id}:${releaseNote.tagName}`;
-    if (!(await this.state.acquireLock(lockKey))) {
-      await this.requeueBusyJob(job, "Release note generation is already running.", checkCancellation);
-      return "deferred";
-    }
+    const contextSeed: EventContextSeed = { runType: "release_note", runId: releaseNoteEntryId, sha: releaseNote.tagSha };
+    await this.recordEvent(
+      { source: "worker", runType: "release_note", runId: releaseNoteEntryId, project: releaseNote.gitlabProjectId, sha: releaseNote.tagSha },
+      "info",
+      "job_claimed",
+      "Worker claimed queued release note job.",
+      {
+        jobId: job.id,
+        kind: job.kind,
+        attempts: job.attempts,
+        releaseNoteId,
+        tagName: releaseNote.tagName
+      }
+    );
 
-    try {
-      await this.state.markReleaseNoteEntryRunning(releaseNoteEntryId);
-      const botConnection = await this.reviewerBot.getConnection();
-      if (!botConnection) throw new Error("Reviewer bot token is not connected");
-      const client = new GitLabClient(botConnection);
-      const tags = await client.listTags(sharedProject.gitlabProjectId);
-      const currentTag = currentReleaseTag(tags, releaseNote.tagName, releaseNote.tagSha);
-      const previousTag = previousReleaseTag(tags, currentTag);
-      const compare = previousTag
-        ? await client.compareRefs(sharedProject.gitlabProjectId, previousTag.name, currentTag.name)
-        : {
-            commits: [currentTag.commit ?? await client.getCommit(sharedProject.gitlabProjectId, releaseNote.tagSha)],
-            diffs: await client.listCommitDiffs(sharedProject.gitlabProjectId, releaseNote.tagSha)
-          };
-      const commits = orderCommitsOldestFirst(compare.commits.filter((commit) => Boolean(commit.id)));
-      const formatted = formatReleaseDiff(
-        projectDisplayName(sharedProject),
-        currentTag.name,
-        previousTag?.name ?? null,
-        commits,
-        compare.diffs,
-        this.config.maxDiffBytes
-      );
-      const modelSettings = await this.reviewSettings.getEffectiveReviewSettings();
-      const settings = runtimeSettings(modelSettings.model, "xhigh");
-      console.log(
-        `[worker] [release-note] Generating release note: project=${sharedProject.gitlabProjectId}, tag=${currentTag.name}, previous=${previousTag?.name ?? "none"}.`
-      );
-      const result = await this.releaseNoteWriter.write(
-        {
-          projectName: projectDisplayName(sharedProject),
-          tagName: currentTag.name,
-          previousTagName: previousTag?.name ?? null,
-          commitCount: commits.length,
-          commits,
-          diffText: formatted.text,
-          diffTruncated: formatted.truncated,
-          omittedFiles: formatted.omittedFiles
-        },
-        settings,
-        { signal }
-      );
-      await ensureNotCanceled(signal, checkCancellation);
-      const publishedRelease = await publishGitLabReleaseNote(
-        client,
-        sharedProject,
-        currentTag.name,
-        result.structured.title,
-        result.markdown,
-        job.kind === "release_note_manual" ? "manual" : "webhook"
-      );
-      await ensureNotCanceled(signal, checkCancellation);
-      await this.state.finishReleaseNoteEntry(releaseNoteEntryId, {
-        title: result.structured.title,
-        notesMarkdown: result.markdown,
-        structured: result.structured,
-        previousTagName: previousTag?.name ?? null,
-        previousTagSha: tagSha(previousTag),
-        commitCount: commits.length,
-        releaseUrl: publishedRelease.url
-      });
-      console.log(
-        `[worker] [release-note] Release note completed: project=${sharedProject.gitlabProjectId}, tag=${currentTag.name}, release=${publishedRelease.url ?? "unknown"}, prompt=${RELEASE_NOTE_PROMPT_VERSION}.`
-      );
-      return "processed";
-    } catch (error) {
-      if (isCancellationError(error, signal)) throw error;
-      await this.state.failReleaseNoteEntry(releaseNoteEntryId, error);
-      throw error;
-    } finally {
-      await this.state.releaseLock(lockKey);
-    }
+    return this.withProjectJobLock(
+      job,
+      gitlabProjectRefId,
+      contextSeed,
+      checkCancellation,
+      async ({ botConnection, client, sharedProject }, context) => {
+        if (!context) throw new Error("Release note event context is required");
+        const projectName = projectDisplayName(sharedProject);
+        const lockKey = `release-note:${sharedProject.id}:${releaseNote.tagName}`;
+        if (!(await this.state.acquireLock(lockKey))) {
+          await this.requeueBusyJob(job, "Release note generation is already running.", checkCancellation, context);
+          return "deferred";
+        }
+
+        try {
+          await this.state.markReleaseNoteEntryRunning(releaseNoteEntryId);
+          await this.recordEvent(context, "info", "release_note_started", "Release note generation started.", {
+            trigger: job.kind === "release_note_manual" ? "manual" : "webhook",
+            tagName: releaseNote.tagName
+          });
+          await this.recordEvent(context, "info", "lock_acquired", "Release note lock acquired.");
+          const tags = await client.listTags(sharedProject.gitlabProjectId);
+          await this.recordEvent(context, "info", "tags_fetched", "GitLab release tags fetched.", {
+            tagCount: tags.length,
+            requestedTagName: releaseNote.tagName
+          });
+          const currentTag = currentReleaseTag(tags, releaseNote.tagName, releaseNote.tagSha);
+          const previousTag = previousReleaseTag(tags, currentTag);
+          const compare = previousTag
+            ? await client.compareRefs(sharedProject.gitlabProjectId, previousTag.name, currentTag.name)
+            : {
+                commits: [currentTag.commit ?? await client.getCommit(sharedProject.gitlabProjectId, releaseNote.tagSha)],
+                diffs: await client.listCommitDiffs(sharedProject.gitlabProjectId, releaseNote.tagSha)
+              };
+          const commits = orderCommitsOldestFirst(compare.commits.filter((commit) => Boolean(commit.id)));
+          const changedFiles = changedFilesFromDiffs(compare.diffs);
+          await this.recordEvent(context, "info", "compare_fetched", "GitLab tag comparison data fetched.", {
+            tagName: currentTag.name,
+            previousTagName: previousTag?.name ?? null,
+            commitCount: commits.length,
+            diffFileCount: compare.diffs.length,
+            changedFileCount: changedFiles.length
+          });
+          const formatted = formatReleaseDiff(
+            projectName,
+            currentTag.name,
+            previousTag?.name ?? null,
+            commits,
+            compare.diffs,
+            this.config.maxDiffBytes
+          );
+          await this.recordEvent(context, "info", "diff_formatted", "Release note context prepared from tag changes.", {
+            diffBytes: Buffer.byteLength(formatted.text, "utf8"),
+            diffTruncated: formatted.truncated,
+            omittedFileCount: formatted.omittedFiles
+          });
+          const checkout = await this.checkoutWorkspace(context, sharedProject, botConnection.accessToken, tagSha(currentTag) ?? releaseNote.tagSha);
+          const domainContext = await this.state.getSharedProjectReleaseNotesContext(sharedProject.id);
+          await this.recordEvent(context, "info", "release_context_loaded", "Release note workspace and domain context loaded.", {
+            workingDirectory: checkout.path,
+            checkoutSha: shortSha(checkout.sha),
+            changedFileCount: changedFiles.length,
+            domainContextConfigured: Boolean(domainContext.trim())
+          });
+          const modelSettings = await this.reviewSettings.getEffectiveReviewSettings();
+          const settings = runtimeSettings(modelSettings.model, "xhigh");
+          await this.recordEvent(context, "info", "codex_started", "Codex release note generation started.", {
+            promptVersion: RELEASE_NOTE_PROMPT_VERSION,
+            model: settings.model,
+            modelReasoningEffort: settings.reasoningEffort,
+            sandboxMode: this.config.codexSandboxMode
+          });
+          console.log(
+            `[worker] [release-note] Generating release note: project=${sharedProject.gitlabProjectId}, tag=${currentTag.name}, previous=${previousTag?.name ?? "none"}.`
+          );
+          const result = await this.releaseNoteWriter.write(
+            {
+              projectName,
+              tagName: currentTag.name,
+              previousTagName: previousTag?.name ?? null,
+              commitCount: commits.length,
+              commits,
+              diffText: formatted.text,
+              diffTruncated: formatted.truncated,
+              omittedFiles: formatted.omittedFiles,
+              workingDirectory: checkout.path,
+              changedFiles,
+              domainContext
+            },
+            (event) => this.recordEvent(context, event.level, event.step, event.message, event.metadata),
+            settings,
+            { signal }
+          );
+          await ensureNotCanceled(signal, checkCancellation);
+          await this.recordEvent(context, "info", "codex_finished", "Codex release note generation finished.", {
+            title: result.structured.title,
+            responseBytes: Buffer.byteLength(result.raw, "utf8"),
+            highlightCount: result.structured.highlights.length,
+            improvementCount: result.structured.improvements.length,
+            fixCount: result.structured.fixes.length
+          });
+          await this.recordEvent(context, "info", "release_publish_started", "GitLab Release publish started.", {
+            tagName: currentTag.name
+          });
+          const publishedRelease = await publishGitLabReleaseNote(
+            client,
+            sharedProject,
+            currentTag.name,
+            result.structured.title,
+            result.markdown,
+            job.kind === "release_note_manual" ? "manual" : "webhook"
+          );
+          await ensureNotCanceled(signal, checkCancellation);
+          await this.recordEvent(context, "info", "release_published", "GitLab Release published.", {
+            releaseUrl: publishedRelease.url,
+            tagName: currentTag.name
+          });
+          await this.state.finishReleaseNoteEntry(releaseNoteEntryId, {
+            title: result.structured.title,
+            notesMarkdown: result.markdown,
+            structured: result.structured,
+            previousTagName: previousTag?.name ?? null,
+            previousTagSha: tagSha(previousTag),
+            commitCount: commits.length,
+            releaseUrl: publishedRelease.url
+          });
+          await this.recordEvent(context, "info", "release_note_finished", "Release note generation finished.", {
+            finalStatus: "completed",
+            releaseUrl: publishedRelease.url,
+            commitCount: commits.length
+          });
+          console.log(
+            `[worker] [release-note] Release note completed: project=${sharedProject.gitlabProjectId}, tag=${currentTag.name}, release=${publishedRelease.url ?? "unknown"}, prompt=${RELEASE_NOTE_PROMPT_VERSION}.`
+          );
+          return "processed";
+        } catch (error) {
+          if (isCancellationError(error, signal)) throw error;
+          await this.recordEvent(context, "error", "release_note_failed", "Release note generation failed.", {
+            error: errorMessage(error),
+            jobId: job.id,
+            tagName: releaseNote.tagName
+          });
+          await this.state.failReleaseNoteEntry(releaseNoteEntryId, error);
+          throw error;
+        } finally {
+          await this.state.releaseLock(lockKey);
+        }
+      },
+      "Project review or release note job is already running."
+    );
   }
 
   private async executeWebhookCommitJob(job: ReviewJobView, signal?: AbortSignal, checkCancellation?: CancellationCheck): Promise<"processed" | "deferred"> {
@@ -496,16 +639,8 @@ export class ReviewWorker {
     const commitSha = stringFromPayload(job.payload, "commitSha");
     if (!gitlabProjectRefId || !commitSha) throw new Error("Webhook commit review job payload is invalid");
     const branchName = stringFromPayload(job.payload, "branchName");
-    const botConnection = await this.reviewerBot.getConnection();
-    if (!botConnection) throw new Error("Reviewer bot token is not connected");
-    const client = new GitLabClient(botConnection);
-    const sharedProject = await this.state.getGitlabProject(gitlabProjectRefId);
-    const projectLockKey = `project:${sharedProject.gitlabHost}:${sharedProject.gitlabProjectId}`;
-    if (!(await this.state.acquireLock(projectLockKey))) {
-      await this.requeueBusyJob(job, "Project review is already running.", checkCancellation);
-      return "deferred";
-    }
-    try {
+    const contextSeed = job.runType && job.runId ? { runType: job.runType, runId: job.runId, sha: commitSha } : null;
+    return this.withProjectJobLock(job, gitlabProjectRefId, contextSeed, checkCancellation, async ({ botConnection, client, sharedProject }) => {
       const commit = await client.getCommit(sharedProject.gitlabProjectId, commitSha);
       const didReview = await this.reviewCommitShared(
         client,
@@ -519,16 +654,15 @@ export class ReviewWorker {
         "worker",
         null,
         signal,
-        checkCancellation
+        checkCancellation,
+        true
       );
       if (!didReview) {
         await this.requeueBusyJob(job, "Commit review lock is already held.", checkCancellation);
         return "deferred";
       }
       return "processed";
-    } finally {
-      await this.state.releaseLock(projectLockKey);
-    }
+    });
   }
 
   private async executeWebhookMrJob(job: ReviewJobView, signal?: AbortSignal, checkCancellation?: CancellationCheck): Promise<"processed" | "deferred"> {
@@ -537,16 +671,8 @@ export class ReviewWorker {
     const mrIid = numberFromPayload(job.payload, "mrIid");
     const headSha = stringFromPayload(job.payload, "headSha");
     if (!gitlabProjectRefId || !mrIid || !headSha) throw new Error("Webhook MR review job payload is invalid");
-    const botConnection = await this.reviewerBot.getConnection();
-    if (!botConnection) throw new Error("Reviewer bot token is not connected");
-    const client = new GitLabClient(botConnection);
-    const sharedProject = await this.state.getGitlabProject(gitlabProjectRefId);
-    const projectLockKey = `project:${sharedProject.gitlabHost}:${sharedProject.gitlabProjectId}`;
-    if (!(await this.state.acquireLock(projectLockKey))) {
-      await this.requeueBusyJob(job, "Project review is already running.", checkCancellation);
-      return "deferred";
-    }
-    try {
+    const contextSeed = job.runType && job.runId ? { runType: job.runType, runId: job.runId, sha: headSha } : null;
+    return this.withProjectJobLock(job, gitlabProjectRefId, contextSeed, checkCancellation, async ({ botConnection, client, sharedProject }) => {
       const mrs = await client.listOpenedMergeRequests(sharedProject.gitlabProjectId);
       const mr = mrs.find((candidate) => candidate.iid === mrIid);
       if (!mr) throw new Error("Merge request is no longer opened");
@@ -561,16 +687,15 @@ export class ReviewWorker {
         headSha,
         "worker",
         signal,
-        checkCancellation
+        checkCancellation,
+        true
       );
       if (!didReview) {
         await this.requeueBusyJob(job, "MR review lock is already held.", checkCancellation);
         return "deferred";
       }
       return "processed";
-    } finally {
-      await this.state.releaseLock(projectLockKey);
-    }
+    });
   }
 
   private async executeManualCommitJob(job: ReviewJobView, signal?: AbortSignal, checkCancellation?: CancellationCheck): Promise<"processed" | "deferred"> {
@@ -580,16 +705,8 @@ export class ReviewWorker {
     if (!gitlabProjectRefId || !commitSha) throw new Error("Manual commit review job payload is invalid");
     const branchName = stringFromPayload(job.payload, "branchName");
     const reviewStrategy = parseReviewStrategy(stringFromPayload(job.payload, "reviewStrategy"));
-    const botConnection = await this.reviewerBot.getConnection();
-    if (!botConnection) throw new Error("Reviewer bot token is not connected");
-    const client = new GitLabClient(botConnection);
-    const sharedProject = await this.state.getGitlabProject(gitlabProjectRefId);
-    const projectLockKey = `project:${sharedProject.gitlabHost}:${sharedProject.gitlabProjectId}`;
-    if (!(await this.state.acquireLock(projectLockKey))) {
-      await this.requeueBusyJob(job, "Project review is already running.", checkCancellation);
-      return "deferred";
-    }
-    try {
+    const contextSeed = job.runType && job.runId ? { runType: job.runType, runId: job.runId, sha: commitSha } : null;
+    return this.withProjectJobLock(job, gitlabProjectRefId, contextSeed, checkCancellation, async ({ botConnection, client, sharedProject }) => {
       const commit = await client.getCommit(sharedProject.gitlabProjectId, commitSha);
       const didReview = await this.reviewCommitShared(
         client,
@@ -603,16 +720,15 @@ export class ReviewWorker {
         "worker",
         reviewStrategy,
         signal,
-        checkCancellation
+        checkCancellation,
+        true
       );
       if (!didReview) {
         await this.requeueBusyJob(job, "Commit review lock is already held.", checkCancellation);
         return "deferred";
       }
       return "processed";
-    } finally {
-      await this.state.releaseLock(projectLockKey);
-    }
+    });
   }
 
   private async executeCommitRetryJob(job: ReviewJobView, signal?: AbortSignal, checkCancellation?: CancellationCheck): Promise<"processed" | "deferred"> {
@@ -621,44 +737,44 @@ export class ReviewWorker {
     if (!runId) throw new Error("Commit retry job payload is invalid");
     const run = await this.state.getCommitRunById(job.userId, runId);
     if (!run) throw new Error("Commit review run not found");
+    const trigger = run.trigger === "auto" ? "auto" : "manual";
+
+    if (run.gitlabProjectRefId) {
+      return this.withProjectJobLock(
+        job,
+        run.gitlabProjectRefId,
+        { runType: "commit", runId: run.id, sha: run.commitSha },
+        checkCancellation,
+        async ({ botConnection, client, sharedProject }) => {
+          const commit = await client.getCommit(run.gitlabProjectId, run.commitSha);
+          const didReview = await this.reviewCommitShared(
+            client,
+            botConnection.accessToken,
+            job.userId,
+            run.projectId,
+            sharedProject,
+            run.branchName,
+            commit,
+            trigger,
+            "worker",
+            run.reviewStrategyOverride,
+            signal,
+            checkCancellation,
+            true
+          );
+          if (!didReview) {
+            await this.requeueBusyJob(job, "Commit review lock is already held.", checkCancellation);
+            return "deferred";
+          }
+          return "processed";
+        }
+      );
+    }
+
     const botConnection = await this.reviewerBot.getConnection();
     if (!botConnection) throw new Error("Reviewer bot token is not connected");
     const client = new GitLabClient(botConnection);
     const commit = await client.getCommit(run.gitlabProjectId, run.commitSha);
-    const trigger = run.trigger === "auto" ? "auto" : "manual";
-
-    if (run.gitlabProjectRefId) {
-      const sharedProject = await this.state.getGitlabProject(run.gitlabProjectRefId);
-      const projectLockKey = `project:${sharedProject.gitlabHost}:${sharedProject.gitlabProjectId}`;
-      if (!(await this.state.acquireLock(projectLockKey))) {
-        await this.requeueBusyJob(job, "Project review is already running.", checkCancellation);
-        return "deferred";
-      }
-      try {
-        const didReview = await this.reviewCommitShared(
-          client,
-          botConnection.accessToken,
-          job.userId,
-          run.projectId,
-          sharedProject,
-          run.branchName,
-          commit,
-          trigger,
-          "worker",
-          run.reviewStrategyOverride,
-          signal,
-          checkCancellation
-        );
-        if (!didReview) {
-          await this.requeueBusyJob(job, "Commit review lock is already held.", checkCancellation);
-          return "deferred";
-        }
-        return "processed";
-      } finally {
-        await this.state.releaseLock(projectLockKey);
-      }
-    }
-
     const project = run.projectId ? await this.state.getProject(job.userId, run.projectId).catch(() => null) : null;
     const didReview = await this.reviewCommit(client, job.userId, project, run.gitlabProjectId, run.branchName, commit, trigger, "worker", signal, checkCancellation);
     if (!didReview) {
@@ -674,43 +790,51 @@ export class ReviewWorker {
     if (!runId) throw new Error("MR retry job payload is invalid");
     const run = await this.state.getRunById(job.userId, runId);
     if (!run) throw new Error("Review run not found");
-    const botConnection = await this.reviewerBot.getConnection();
-    if (!botConnection) throw new Error("Reviewer bot token is not connected");
-    const client = new GitLabClient(botConnection);
 
     if (!run.gitlabProjectRefId) {
+      const botConnection = await this.reviewerBot.getConnection();
+      if (!botConnection) throw new Error("Reviewer bot token is not connected");
+      const client = new GitLabClient(botConnection);
       await this.reviewByCoordinates(client, job.userId, run.projectId, run.gitlabProjectId, run.displayName, run.mrIid, run.headSha, "worker", signal, checkCancellation);
       return "processed";
     }
 
-    const sharedProject = await this.state.getGitlabProject(run.gitlabProjectRefId);
-    const projectLockKey = `project:${sharedProject.gitlabHost}:${sharedProject.gitlabProjectId}`;
-    if (!(await this.state.acquireLock(projectLockKey))) {
-      await this.requeueBusyJob(job, "Project review is already running.", checkCancellation);
-      return "deferred";
-    }
-    try {
-      const mrs = await client.listOpenedMergeRequests(sharedProject.gitlabProjectId);
-      const mr = mrs.find((candidate) => candidate.iid === run.mrIid);
-      if (!mr) throw new Error("Merge request is no longer opened");
-      const didReview = await this.reviewMrShared(client, botConnection.accessToken, sharedProject, { id: run.projectId }, mr, run.headSha, "worker", signal, checkCancellation);
-      if (!didReview) {
-        await this.requeueBusyJob(job, "MR review lock is already held.", checkCancellation);
-        return "deferred";
+    return this.withProjectJobLock(
+      job,
+      run.gitlabProjectRefId,
+      { runType: "mr", runId: run.id, sha: run.headSha },
+      checkCancellation,
+      async ({ botConnection, client, sharedProject }) => {
+        const mrs = await client.listOpenedMergeRequests(sharedProject.gitlabProjectId);
+        const mr = mrs.find((candidate) => candidate.iid === run.mrIid);
+        if (!mr) throw new Error("Merge request is no longer opened");
+        const didReview = await this.reviewMrShared(client, botConnection.accessToken, sharedProject, { id: run.projectId }, mr, run.headSha, "worker", signal, checkCancellation, true);
+        if (!didReview) {
+          await this.requeueBusyJob(job, "MR review lock is already held.", checkCancellation);
+          return "deferred";
+        }
+        return "processed";
       }
-      return "processed";
-    } finally {
-      await this.state.releaseLock(projectLockKey);
-    }
+    );
   }
 
-  private async requeueBusyJob(job: ReviewJobView, message: string, checkCancellation?: CancellationCheck): Promise<void> {
+  private async requeueBusyJob(
+    job: ReviewJobView,
+    message: string,
+    checkCancellation?: CancellationCheck,
+    context?: EventContext
+  ): Promise<void> {
     await ensureNotCanceled(undefined, checkCancellation);
     await this.state.requeueReviewJob(job.id, message);
     await ensureNotCanceled(undefined, checkCancellation);
-    if (job.runType && job.runId) {
+    const eventContext = context ?? (
+      job.runType && job.runId
+        ? { source: "worker" as const, runType: job.runType, runId: job.runId, project: stringFromPayload(job.payload, "gitlabProjectId") ?? "unknown", sha: stringFromPayload(job.payload, "commitSha") ?? String(job.runId) }
+        : null
+    );
+    if (eventContext) {
       await this.recordEvent(
-        { source: "worker", runType: job.runType, runId: job.runId, project: stringFromPayload(job.payload, "gitlabProjectId") ?? "unknown", sha: stringFromPayload(job.payload, "commitSha") ?? String(job.runId) },
+        eventContext,
         "warn",
         "job_deferred",
         `${message} Worker will retry later.`,
@@ -1028,6 +1152,7 @@ export class ReviewWorker {
         reviewProfile: "assertive",
         pathFilters: defaultPathFilters(),
         releaseNotesEnabled: false,
+        releaseNotesContext: null,
         webhookStatus: "missing",
         webhookUrl: null,
         webhookLastVerifiedAt: null,
@@ -1048,7 +1173,8 @@ export class ReviewWorker {
     headSha: string,
     source: ReviewLogSource,
     signal?: AbortSignal,
-    checkCancellation?: CancellationCheck
+    checkCancellation?: CancellationCheck,
+    preludeAlreadyRecorded = false
   ): Promise<boolean> {
     await ensureNotCanceled(signal, checkCancellation);
     const lockKey = `${project.id}:${mr.iid}:${headSha}`;
@@ -1138,7 +1264,8 @@ export class ReviewWorker {
     headSha: string,
     source: ReviewLogSource,
     signal?: AbortSignal,
-    checkCancellation?: CancellationCheck
+    checkCancellation?: CancellationCheck,
+    preludeAlreadyRecorded = false
   ): Promise<boolean> {
     await ensureNotCanceled(signal, checkCancellation);
     const lockKey = `mr:${gitlabProject.id}:${mr.iid}:${headSha}`;
@@ -1148,11 +1275,13 @@ export class ReviewWorker {
 
     try {
       await this.recordEvent(context, "info", "run_started", "MR review run started.", { mrIid: mr.iid, sharedProjectId: gitlabProject.id });
-      await this.recordEvent(context, "info", "bot_token_loaded", "Reviewer bot token loaded for GitLab review actions.");
-      await this.recordEvent(context, "info", "gitlab_project_resolved", "GitLab project metadata resolved.", {
-        pathWithNamespace: gitlabProject.pathWithNamespace,
-        defaultBranch: gitlabProject.defaultBranch
-      });
+      if (!preludeAlreadyRecorded) {
+        await this.recordEvent(context, "info", "bot_token_loaded", "Reviewer bot token loaded for GitLab review actions.");
+        await this.recordEvent(context, "info", "gitlab_project_resolved", "GitLab project metadata resolved.", {
+          pathWithNamespace: gitlabProject.pathWithNamespace,
+          defaultBranch: gitlabProject.defaultBranch
+        });
+      }
       await this.recordEvent(context, "info", "lock_acquired", "Review lock acquired.");
       await ensureNotCanceled(signal, checkCancellation);
       const diffs = await client.listMergeRequestDiffs(gitlabProject.gitlabProjectId, mr.iid);
@@ -1324,7 +1453,8 @@ export class ReviewWorker {
     source: ReviewLogSource,
     reviewStrategyOverride: ReviewStrategy | null = null,
     signal?: AbortSignal,
-    checkCancellation?: CancellationCheck
+    checkCancellation?: CancellationCheck,
+    preludeAlreadyRecorded = false
   ): Promise<boolean> {
     await ensureNotCanceled(signal, checkCancellation);
     const lockKey = `commit:${gitlabProject.id}:${commit.id}`;
@@ -1349,11 +1479,13 @@ export class ReviewWorker {
         reviewStrategy: reviewStrategyOverride ?? gitlabProject.reviewStrategy,
         sharedProjectId: gitlabProject.id
       });
-      await this.recordEvent(context, "info", "bot_token_loaded", "Reviewer bot token loaded for GitLab review actions.");
-      await this.recordEvent(context, "info", "gitlab_project_resolved", "GitLab project metadata resolved.", {
-        pathWithNamespace: gitlabProject.pathWithNamespace,
-        defaultBranch: gitlabProject.defaultBranch
-      });
+      if (!preludeAlreadyRecorded) {
+        await this.recordEvent(context, "info", "bot_token_loaded", "Reviewer bot token loaded for GitLab review actions.");
+        await this.recordEvent(context, "info", "gitlab_project_resolved", "GitLab project metadata resolved.", {
+          pathWithNamespace: gitlabProject.pathWithNamespace,
+          defaultBranch: gitlabProject.defaultBranch
+        });
+      }
       await this.recordEvent(context, "info", "lock_acquired", "Review lock acquired.");
       await ensureNotCanceled(signal, checkCancellation);
       const diffs = await client.listCommitDiffs(gitlabProject.gitlabProjectId, commit.id);
@@ -1714,6 +1846,10 @@ export class ReviewWorker {
 
 function projectDisplayName(project: GitlabProjectRow): string {
   return project.nameWithNamespace ?? project.pathWithNamespace ?? project.gitlabProjectId;
+}
+
+function projectLockKeyFor(project: GitlabProjectRow): string {
+  return `project:${project.gitlabHost}:${project.gitlabProjectId}`;
 }
 
 function currentReleaseTag(tags: GitLabTag[], tagName: string, tagSha: string): GitLabTag {

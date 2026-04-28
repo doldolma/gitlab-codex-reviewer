@@ -382,6 +382,41 @@ describe("multi-user review state", () => {
     await db.$disconnect();
   });
 
+  it("stores release note domain context on the shared project", async () => {
+    const db = await testDb();
+    const state = new ReviewStateStore(db);
+    const userA = await insertTestUser(db, { gitlabUserId: 1, username: "alice" });
+    const userB = await insertTestUser(db, { gitlabUserId: 2, username: "bob" });
+    const shared = await state.upsertGitlabProject({
+      gitlabHost: "https://gitlab.example.com",
+      gitlabProjectId: "123",
+      pathWithNamespace: "group/service",
+      nameWithNamespace: "Group / Service"
+    });
+    const projectA = await state.createProject(userA, {
+      gitlabProjectRefId: shared.id,
+      gitlabProjectId: "123",
+      displayName: "Alice service",
+      enabled: true,
+      skipLabels: []
+    });
+    const projectB = await state.createProject(userB, {
+      gitlabProjectRefId: shared.id,
+      gitlabProjectId: "123",
+      displayName: "Bob service",
+      enabled: true,
+      skipLabels: []
+    });
+
+    await state.updateProjectReleaseNotesContext(userA, projectA.id, " 운영자는 정산 정확도를 중요하게 봅니다. ");
+
+    expect(await state.getProjectReleaseNotesContext(userB, projectB.id)).toEqual({
+      context: "운영자는 정산 정확도를 중요하게 봅니다."
+    });
+    expect(await state.getSharedProjectReleaseNotesContext(shared.id)).toBe("운영자는 정산 정확도를 중요하게 봅니다.");
+    await db.$disconnect();
+  });
+
   it("keeps previous release note entries when the same tag is generated again", async () => {
     const db = await testDb();
     const state = new ReviewStateStore(db);
@@ -432,6 +467,50 @@ describe("multi-user review state", () => {
     expect(notes).toHaveLength(1);
     expect(notes[0]?.notesMarkdown).toBe("second markdown");
     expect(notes[0]?.entries.map((entry) => entry.notesMarkdown)).toEqual(["second markdown", "first markdown"]);
+    await db.$disconnect();
+  });
+
+  it("stores release note entry events with team-wide access", async () => {
+    const db = await testDb();
+    const state = new ReviewStateStore(db);
+    const userA = await insertTestUser(db, { gitlabUserId: 1, username: "alice" });
+    const userB = await insertTestUser(db, { gitlabUserId: 2, username: "bob" });
+    const shared = await state.upsertGitlabProject({
+      gitlabHost: "https://gitlab.example.com",
+      gitlabProjectId: "123",
+      pathWithNamespace: "group/service",
+      nameWithNamespace: "Group / Service"
+    });
+    const { entry } = await state.createQueuedReleaseNote({
+      gitlabProjectRefId: shared.id,
+      gitlabProjectId: shared.gitlabProjectId,
+      projectName: "Group / Service",
+      tagName: "v1.2.0",
+      tagSha: "tag-sha",
+      trigger: "manual",
+      createdByUserId: userA
+    });
+    await state.addReviewEvent({
+      runType: "release_note",
+      runId: entry.id,
+      level: "info",
+      step: "release_note_queued",
+      message: "Queued.",
+      metadata: {
+        tagName: "v1.2.0",
+        token: "secret",
+        diffText: "diff --git"
+      }
+    });
+
+    const events = await state.listReviewEvents(userA, "release_note", entry.id);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.runType).toBe("release_note");
+    expect(events[0]?.metadata.tagName).toBe("v1.2.0");
+    expect(events[0]?.metadata.token).toBeUndefined();
+    expect(events[0]?.metadata.diffText).toBeUndefined();
+    expect(await state.listReviewEvents(userB, "release_note", entry.id)).toHaveLength(1);
+    await expect(state.listReviewEvents(userA, "release_note", entry.id + 1)).rejects.toThrow("Release note entry not found");
     await db.$disconnect();
   });
 

@@ -113,6 +113,7 @@ model GitlabProject {
   reviewProfile          String  @default("assertive") @map("review_profile")
   pathFiltersJson        String  @default("[]") @map("path_filters_json")
   releaseNotesEnabled    Boolean @default(false) @map("release_notes_enabled")
+  releaseNotesContext    String? @map("release_notes_context")
   createdAt              String  @map("created_at")
   updatedAt              String  @map("updated_at")
 

@@ -235,6 +235,20 @@ export class GitLabWebhookService {
       trigger: "webhook",
       createdByUserId: group.representative.userId
     });
+    await this.state.addReviewEvent({
+      runType: "release_note",
+      runId: entry.id,
+      level: "info",
+      step: "release_note_queued",
+      message: "Tag webhook release note generation queued; waiting for worker.",
+      metadata: {
+        trigger: "webhook",
+        releaseNoteId: releaseNote.id,
+        gitlabProjectId: group.gitlabProject.gitlabProjectId,
+        tagName,
+        tagSha
+      }
+    });
     await this.state.createReviewJob({
       kind: "release_note_webhook",
       userId: group.representative.userId,

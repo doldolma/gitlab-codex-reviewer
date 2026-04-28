@@ -3,17 +3,23 @@
 import { type FormEvent, useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Trash2, X } from "lucide-react";
-import { apiGet, apiSend, type Project, type ProjectReviewConfig, type ReviewProfile } from "../lib/api-client";
+import { apiGet, apiSend, type Project, type ProjectReviewConfig, type ReleaseNotesContext, type ReviewProfile } from "../lib/api-client";
 
 export function ProjectReviewConfigDrawer({ project, onClose }: { project: Project | null; onClose: () => void }) {
   const queryClient = useQueryClient();
   const [reviewProfile, setReviewProfile] = useState<ReviewProfile>("assertive");
   const [pathFiltersText, setPathFiltersText] = useState("");
   const [instructions, setInstructions] = useState<ProjectReviewConfig["instructions"]>([]);
+  const [releaseNotesContext, setReleaseNotesContext] = useState("");
 
   const config = useQuery({
     queryKey: ["project-review-config", project?.id],
     queryFn: () => apiGet<{ config: ProjectReviewConfig }>(`/api/projects/${project!.id}/review-config`),
+    enabled: Boolean(project?.id)
+  });
+  const releaseContext = useQuery({
+    queryKey: ["project-release-notes-context", project?.id],
+    queryFn: () => apiGet<ReleaseNotesContext>(`/api/projects/${project!.id}/release-notes/context`),
     enabled: Boolean(project?.id)
   });
 
@@ -24,19 +30,31 @@ export function ProjectReviewConfigDrawer({ project, onClose }: { project: Proje
     setInstructions(config.data.config.instructions);
   }, [config.data]);
 
+  useEffect(() => {
+    if (!releaseContext.data) return;
+    setReleaseNotesContext(releaseContext.data.context);
+  }, [releaseContext.data]);
+
   const save = useMutation({
     mutationFn: () =>
-      apiSend<{ config: ProjectReviewConfig }>(`/api/projects/${project!.id}/review-config`, {
-        method: "PATCH",
-        body: JSON.stringify({
-          reviewProfile,
-          pathFilters: pathFiltersText.split(/\r?\n/).map((value) => value.trim()).filter(Boolean),
-          instructions
+      Promise.all([
+        apiSend<{ config: ProjectReviewConfig }>(`/api/projects/${project!.id}/review-config`, {
+          method: "PATCH",
+          body: JSON.stringify({
+            reviewProfile,
+            pathFilters: pathFiltersText.split(/\r?\n/).map((value) => value.trim()).filter(Boolean),
+            instructions
+          })
+        }),
+        apiSend<ReleaseNotesContext>(`/api/projects/${project!.id}/release-notes/context`, {
+          method: "PATCH",
+          body: JSON.stringify({ context: releaseNotesContext })
         })
-      }),
+      ]),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["projects"] });
       void queryClient.invalidateQueries({ queryKey: ["project-review-config", project?.id] });
+      void queryClient.invalidateQueries({ queryKey: ["project-release-notes-context", project?.id] });
     }
   });
 
@@ -68,7 +86,7 @@ export function ProjectReviewConfigDrawer({ project, onClose }: { project: Proje
           </button>
         </header>
 
-        {config.isLoading ? (
+        {config.isLoading || releaseContext.isLoading ? (
           <div className="empty compact">리뷰 설정을 불러오는 중...</div>
         ) : (
           <form className="stacked-form" onSubmit={submit}>
@@ -141,6 +159,19 @@ export function ProjectReviewConfigDrawer({ project, onClose }: { project: Proje
                 {!instructions.length && <div className="empty compact">아직 추가된 path instruction이 없습니다</div>}
               </div>
             </div>
+
+            <section className="drawer-section">
+              <h3>릴리즈노트 컨텍스트</h3>
+              <label>
+                <span>도메인 지식</span>
+                <textarea
+                  value={releaseNotesContext}
+                  onChange={(event) => setReleaseNotesContext(event.target.value)}
+                  rows={8}
+                  placeholder={"사용자 역할, 주요 용어, 릴리즈노트를 읽는 대상, 제품에서 중요한 가치 기준을 적어주세요.\n예: 운영자는 정산 정확도와 데이터 조회 안정성을 중요하게 봅니다."}
+                />
+              </label>
+            </section>
 
             {save.error && <div className="alert error">{save.error.message}</div>}
             <button className="button full" type="submit" disabled={save.isPending}>

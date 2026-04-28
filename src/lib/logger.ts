@@ -1,10 +1,10 @@
-import type { ReviewEventLevel, ReviewRunType } from "./review-state";
+import type { ReviewEventLevel, ReviewEventRunType } from "./review-state";
 
 export type ReviewLogSource = "web" | "worker";
 
 export type ReviewLogContext = {
   source: ReviewLogSource;
-  runType?: ReviewRunType;
+  runType?: ReviewEventRunType;
   runId?: number;
   project?: string | number | null;
   sha?: string | null;

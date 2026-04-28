@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { CheckCircle2, Cpu, Gauge, MessageSquareText, SlidersHorizontal, Terminal, XCircle } from "lucide-react";
 
 const PROGRESS_STAGES = ["대기 중", "GitLab diff 준비", "workspace checkout", "Codex 리뷰", "결과 게시", "완료"];
+const RELEASE_NOTE_PROGRESS_STAGES = ["대기 중", "태그 비교 준비", "Codex 작성", "GitLab 게시", "완료"];
 
 export function ReviewProgressSummary({ events, status }: { events: ReviewEvent[]; status: string | null }) {
   const activeIndex = progressIndex(events, status);
@@ -29,13 +30,48 @@ export function ReviewProgressSummary({ events, status }: { events: ReviewEvent[
   );
 }
 
-export function ReviewEventTimeline({ events, isLoading }: { events: ReviewEvent[]; isLoading: boolean }) {
+export function ReleaseNoteProgressSummary({ events, status }: { events: ReviewEvent[]; status: string | null }) {
+  const activeIndex = releaseNoteProgressIndex(events, status);
+  const latest = events.at(-1);
+  const modelLabel = reviewModelLabel(events);
+
+  return (
+    <section className="progress-card">
+      <div>
+        <span className="eyebrow">현재 단계</span>
+        <strong>{RELEASE_NOTE_PROGRESS_STAGES[activeIndex]}</strong>
+        <p>{latest ? messageForEvent(latest) : status === "queued" ? "worker가 릴리즈노트 작업을 가져가길 기다리는 중입니다." : "릴리즈노트 이벤트를 기다리는 중입니다."}</p>
+        {modelLabel && <p>작성 모델: {modelLabel}</p>}
+      </div>
+      <ol className="progress-steps">
+        {RELEASE_NOTE_PROGRESS_STAGES.map((stage, index) => (
+          <li key={stage} className={progressClass(index, activeIndex, status)}>
+            <span>{index + 1}</span>
+            {stage}
+          </li>
+        ))}
+      </ol>
+    </section>
+  );
+}
+
+export function ReviewEventTimeline({
+  events,
+  isLoading,
+  loadingText = "실행 이벤트를 불러오는 중...",
+  emptyText = "아직 기록된 실행 이벤트가 없습니다"
+}: {
+  events: ReviewEvent[];
+  isLoading: boolean;
+  loadingText?: string;
+  emptyText?: string;
+}) {
   if (isLoading) {
-    return <div className="empty compact">리뷰 이벤트를 불러오는 중...</div>;
+    return <div className="empty compact">{loadingText}</div>;
   }
 
   if (!events.length) {
-    return <div className="empty compact">아직 기록된 리뷰 이벤트가 없습니다</div>;
+    return <div className="empty compact">{emptyText}</div>;
   }
 
   return (
@@ -60,7 +96,7 @@ function TimelineEvent({ event }: { event: ReviewEvent }) {
 function CheckpointEvent({ event }: { event: ReviewEvent }) {
   return (
     <li className={`event-item event-checkpoint ${event.level}`}>
-      <EventHeader event={event} icon={<CheckCircle2 size={15} />} title={labelForStep(event.step)} />
+      <EventHeader event={event} icon={<CheckCircle2 size={15} />} title={labelForEventStep(event)} />
       <p>{messageForEvent(event)}</p>
       <RawMetadata event={event} />
     </li>
@@ -71,9 +107,10 @@ function CodexStartedEvent({ event }: { event: ReviewEvent }) {
   const model = stringMetadata(event, "model") ?? "Codex";
   const effort = stringMetadata(event, "modelReasoningEffort");
   const promptVersion = stringMetadata(event, "promptVersion");
+  const title = event.runType === "release_note" ? "Codex 릴리즈노트 작성 시작" : "Codex 리뷰 시작";
   return (
     <li className="event-item codex-activity">
-      <EventHeader event={event} icon={<Cpu size={16} />} title="Codex 리뷰 시작" />
+      <EventHeader event={event} icon={<Cpu size={16} />} title={title} />
       <div className="activity-badges">
         <span>{model}</span>
         {effort && <span>{effort}</span>}
@@ -92,7 +129,7 @@ function StrategyEvent({ event }: { event: ReviewEvent }) {
   const signals = arrayMetadata(event, "triageRiskSignals");
   return (
     <li className={`event-item codex-activity ${event.level}`}>
-      <EventHeader event={event} icon={<SlidersHorizontal size={16} />} title={labelForStep(event.step)} badge={effort ?? undefined} />
+      <EventHeader event={event} icon={<SlidersHorizontal size={16} />} title={labelForEventStep(event)} badge={effort ?? undefined} />
       <div className="activity-badges">
         {strategy && <span>{strategyLabel(strategy)}</span>}
         {riskLevel && <span>위험도 {riskLevelLabel(riskLevel)}</span>}
@@ -184,7 +221,7 @@ function CodexUsageEvent({ event }: { event: ReviewEvent }) {
 function ErrorEvent({ event }: { event: ReviewEvent }) {
   return (
     <li className="event-item error codex-activity">
-      <EventHeader event={event} icon={<XCircle size={16} />} title={labelForStep(event.step)} badge="실패" />
+      <EventHeader event={event} icon={<XCircle size={16} />} title={labelForEventStep(event)} badge="실패" />
       <p>{messageForEvent(event)}</p>
       <RawMetadata event={event} />
     </li>
@@ -235,6 +272,32 @@ function progressIndex(events: ReviewEvent[], status: string | null): number {
   return 0;
 }
 
+function releaseNoteProgressIndex(events: ReviewEvent[], status: string | null): number {
+  if (status === "completed" || status === "failed") return 4;
+  const latestStep = events.at(-1)?.step;
+  if (!latestStep) return status === "running" ? 1 : 0;
+  if (latestStep === "release_note_finished" || latestStep === "release_note_failed" || latestStep === "release_published") return 4;
+  if (latestStep === "release_publish_started") return 3;
+  if (latestStep.startsWith("codex_")) return 2;
+  if (
+    [
+      "job_claimed",
+      "bot_token_loaded",
+      "gitlab_project_resolved",
+      "project_lock_acquired",
+      "release_note_started",
+      "lock_acquired",
+      "tags_fetched",
+      "compare_fetched",
+      "diff_formatted",
+      "workspace_checkout_started",
+      "workspace_checkout_finished",
+      "release_context_loaded"
+    ].includes(latestStep)
+  ) return 1;
+  return 0;
+}
+
 function progressClass(index: number, activeIndex: number, status: string | null): string {
   if (status === "failed" && index === activeIndex) return "failed";
   if (status === "canceled" && index === activeIndex) return "failed";
@@ -253,13 +316,28 @@ function labelForStep(step: string): string {
     .join(" ");
 }
 
+function labelForEventStep(event: ReviewEvent): string {
+  if (event.runType === "release_note") {
+    const label = RELEASE_NOTE_STEP_LABELS[event.step];
+    if (label) return label;
+  }
+  return labelForStep(event.step);
+}
+
 const STEP_LABELS: Record<string, string> = {
   run_queued: "리뷰 대기열 등록",
+  release_note_queued: "릴리즈노트 대기열 등록",
   job_claimed: "worker 작업 시작",
   run_started: "리뷰 실행 시작",
+  release_note_started: "릴리즈노트 작성 시작",
   bot_token_loaded: "Reviewer Bot 토큰 확인",
   gitlab_project_resolved: "GitLab 프로젝트 확인",
+  project_lock_acquired: "프로젝트 lock 획득",
   lock_acquired: "리뷰 lock 획득",
+  tags_fetched: "태그 목록 가져오기",
+  compare_fetched: "태그 비교 가져오기",
+  diff_formatted: "변경사항 정리",
+  release_context_loaded: "릴리즈노트 컨텍스트 준비",
   diff_fetched: "diff 가져오기",
   workspace_checkout_started: "workspace checkout 시작",
   workspace_checkout_finished: "workspace checkout 완료",
@@ -276,27 +354,51 @@ const STEP_LABELS: Record<string, string> = {
   codex_message: "Codex 메시지",
   codex_usage: "토큰 사용량",
   codex_finished: "Codex 리뷰 완료",
+  release_publish_started: "GitLab Release 게시 시작",
+  release_published: "GitLab Release 게시 완료",
   comment_posted: "댓글 게시",
   inline_comment_posted: "인라인 댓글 게시",
   inline_comment_failed: "인라인 댓글 실패",
   review_feedback_recorded: "리뷰 피드백 저장",
   no_findings: "이슈 없음",
   run_failed: "리뷰 실패",
+  release_note_failed: "릴리즈노트 작성 실패",
   run_canceled: "리뷰 취소",
-  run_finished: "리뷰 완료"
+  run_finished: "리뷰 완료",
+  release_note_finished: "릴리즈노트 작성 완료"
+};
+
+const RELEASE_NOTE_STEP_LABELS: Record<string, string> = {
+  job_claimed: "worker 작업 시작",
+  bot_token_loaded: "Reviewer Bot 토큰 확인",
+  lock_acquired: "릴리즈노트 lock 획득",
+  codex_started: "Codex 릴리즈노트 작성 시작",
+  codex_finished: "Codex 릴리즈노트 작성 완료",
+  codex_usage: "토큰 사용량"
 };
 
 function messageForEvent(event: ReviewEvent): string {
+  if (event.runType === "release_note") {
+    const message = RELEASE_NOTE_EVENT_MESSAGES[event.step];
+    if (message) return message;
+  }
   return EVENT_MESSAGES[event.step] ?? event.message;
 }
 
 const EVENT_MESSAGES: Record<string, string> = {
   run_queued: "리뷰가 대기열에 등록되었습니다.",
+  release_note_queued: "릴리즈노트 작성 작업이 대기열에 등록되었습니다.",
   job_claimed: "worker가 리뷰 작업을 시작했습니다.",
   run_started: "리뷰 실행이 시작되었습니다.",
+  release_note_started: "릴리즈노트 작성이 시작되었습니다.",
   bot_token_loaded: "Reviewer Bot 토큰을 확인했습니다.",
   gitlab_project_resolved: "GitLab 프로젝트 정보를 확인했습니다.",
+  project_lock_acquired: "프로젝트 단위 lock을 획득했습니다.",
   lock_acquired: "리뷰 lock을 획득했습니다.",
+  tags_fetched: "GitLab 태그 목록을 가져왔습니다.",
+  compare_fetched: "이전 태그부터 선택 태그까지의 변경사항을 가져왔습니다.",
+  diff_formatted: "릴리즈노트 작성에 사용할 변경사항 요약을 준비했습니다.",
+  release_context_loaded: "workspace와 프로젝트 릴리즈노트 컨텍스트를 준비했습니다.",
   diff_fetched: "GitLab diff를 가져왔습니다.",
   workspace_checkout_started: "workspace checkout을 시작했습니다.",
   workspace_checkout_finished: "workspace checkout을 완료했습니다.",
@@ -310,14 +412,28 @@ const EVENT_MESSAGES: Record<string, string> = {
   codex_triage_failed: "Auto triage가 실패해 안전 기본값으로 진행합니다.",
   codex_started: "Codex 리뷰가 시작되었습니다.",
   codex_finished: "Codex 리뷰가 완료되었습니다.",
+  release_publish_started: "GitLab Release 게시를 시작했습니다.",
+  release_published: "GitLab Release를 게시했습니다.",
   comment_posted: "GitLab 댓글을 게시했습니다.",
   inline_comment_posted: "GitLab 인라인 댓글을 처리했습니다.",
   inline_comment_failed: "GitLab 인라인 댓글을 게시하지 못했습니다.",
   review_feedback_recorded: "리뷰 피드백을 저장했습니다.",
   no_findings: "액션이 필요한 이슈는 없습니다.",
   run_failed: "리뷰 실행이 실패했습니다.",
+  release_note_failed: "릴리즈노트 작성이 실패했습니다.",
   run_canceled: "리뷰가 취소되었습니다.",
-  run_finished: "리뷰 실행이 완료되었습니다."
+  run_finished: "리뷰 실행이 완료되었습니다.",
+  release_note_finished: "릴리즈노트 작성이 완료되었습니다."
+};
+
+const RELEASE_NOTE_EVENT_MESSAGES: Record<string, string> = {
+  job_claimed: "worker가 릴리즈노트 작업을 시작했습니다.",
+  bot_token_loaded: "Reviewer Bot 토큰을 확인했습니다.",
+  project_lock_acquired: "프로젝트 단위 lock을 획득했습니다.",
+  lock_acquired: "릴리즈노트 lock을 획득했습니다.",
+  codex_started: "Codex 릴리즈노트 작성이 시작되었습니다.",
+  codex_finished: "Codex 릴리즈노트 작성이 완료되었습니다.",
+  codex_usage: "Codex 릴리즈노트 작성 토큰 사용량을 기록했습니다."
 };
 
 function reviewModelLabel(events: ReviewEvent[]): string | null {

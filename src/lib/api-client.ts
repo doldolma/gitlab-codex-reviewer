@@ -76,6 +76,7 @@ export type Project = {
   reviewProfile: ReviewProfile;
   pathFilters: string[];
   releaseNotesEnabled: boolean;
+  releaseNotesContext: string | null;
   webhookStatus: "connected" | "error" | "missing";
   webhookUrl: string | null;
   webhookLastVerifiedAt: string | null;
@@ -86,6 +87,10 @@ export type ProjectReviewConfig = {
   reviewProfile: ReviewProfile;
   pathFilters: string[];
   instructions: { id: number; pathGlob: string; instructions: string; enabled: boolean }[];
+};
+
+export type ReleaseNotesContext = {
+  context: string;
 };
 
 export type StructuredReviewIssue = {
@@ -224,7 +229,7 @@ export type ReleaseNoteEntry = {
 
 export type ReviewEvent = {
   id: number;
-  runType: "mr" | "commit";
+  runType: "mr" | "commit" | "release_note";
   runId: number;
   level: "info" | "warn" | "error";
   step: string;

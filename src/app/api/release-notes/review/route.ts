@@ -51,6 +51,19 @@ export async function POST(request: Request) {
       trigger: "manual",
       createdByUserId: user.id
     });
+    await reviewState.addReviewEvent({
+      runType: "release_note",
+      runId: entry.id,
+      level: "info",
+      step: "release_note_queued",
+      message: "Manual release note generation queued; waiting for worker.",
+      metadata: {
+        trigger: "manual",
+        releaseNoteId: releaseNote.id,
+        gitlabProjectId: sharedProject.gitlabProjectId,
+        tagName: tag.name
+      }
+    });
 
     const job = await reviewState.createReviewJob({
       kind: "release_note_manual",

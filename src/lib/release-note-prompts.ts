@@ -11,6 +11,9 @@ export type ReleaseNotePromptInput = {
   diffText: string;
   diffTruncated: boolean;
   omittedFiles: number;
+  workingDirectory?: string | null;
+  changedFiles?: string[];
+  domainContext?: string | null;
 };
 
 export type StructuredReleaseNote = {
@@ -54,6 +57,9 @@ export const RELEASE_NOTE_OUTPUT_SCHEMA = {
 
 export function buildReleaseNotePrompt(input: ReleaseNotePromptInput): string {
   const range = input.previousTagName ? `${input.previousTagName}부터 ${input.tagName}까지` : `${input.tagName}까지`;
+  const workspaceLine = input.workingDirectory
+    ? "You are running inside the checked-out Git repository at the selected tag. Use read-only tools when useful to inspect README, docs, changed files, configuration, UI copy, schemas, and product-facing behavior."
+    : "A repository workspace is not available. Write only from the provided commits and diff.";
   return `SYSTEM:
 You are a product release note writer.
 
@@ -68,6 +74,14 @@ Style:
 - Do not mention that you read a diff.
 - Return only JSON that matches the schema.
 
+Tool policy:
+- Use available read-only tools when needed to understand user-facing behavior, terminology, product documentation, configuration, or changed files.
+- Do not modify files.
+- Do not run tests, package managers, network calls, build commands, migrations, formatters, generators, or any command with side effects.
+- Prefer read-only commands: rg, git show, git diff, git status, sed, cat, ls, find.
+
+${workspaceLine}
+
 USER:
 
 ## Release Context
@@ -77,6 +91,14 @@ Range: ${range}
 Prompt version: ${RELEASE_NOTE_PROMPT_VERSION}
 Commit count: ${input.commitCount}
 Diff truncated: ${input.diffTruncated ? `yes, omitted files: ${input.omittedFiles}` : "no"}
+
+## Changed Files
+${renderList(input.changedFiles ?? [], "No changed files were provided.")}
+
+## Domain Context
+${input.domainContext?.trim() || "No project-specific release note context was configured."}
+
+Use Domain Context only to interpret terminology, audience, and user impact. Do not invent features or behavior that is not supported by commits, diff, or read-only repository evidence.
 
 ## Commit Summaries
 ${renderCommits(input.commits)}
@@ -131,6 +153,12 @@ function renderSection(title: string, items: string[]): string {
   const cleanItems = items.map((item) => item.trim()).filter(Boolean);
   if (!cleanItems.length) return "";
   return [`## ${title}`, ...cleanItems.map((item) => `- ${item}`)].join("\n");
+}
+
+function renderList(values: string[], fallback: string): string {
+  const normalized = values.map((value) => value.trim()).filter(Boolean);
+  if (!normalized.length) return fallback;
+  return normalized.slice(0, 200).map((value) => `- ${value}`).join("\n");
 }
 
 function indent(value: string): string {

@@ -36,6 +36,7 @@ export type ProjectRow = {
   reviewProfile: ReviewProfile;
   pathFilters: string[];
   releaseNotesEnabled: boolean;
+  releaseNotesContext: string | null;
   webhookStatus: "connected" | "error" | "missing";
   webhookUrl: string | null;
   webhookLastVerifiedAt: string | null;
@@ -63,6 +64,7 @@ export type GitlabProjectRow = {
   reviewProfile: ReviewProfile;
   pathFilters: string[];
   releaseNotesEnabled: boolean;
+  releaseNotesContext: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -160,6 +162,7 @@ export type CommitReviewRunView = {
 export type ReviewFeedbackRating = "helpful" | "false_positive" | "too_minor" | "missed_issue";
 
 export type ReviewRunType = "mr" | "commit";
+export type ReviewEventRunType = ReviewRunType | "release_note";
 export type ReviewEventLevel = "info" | "warn" | "error";
 export type ReviewJobKind =
   | "commit_manual"
@@ -188,7 +191,7 @@ export type ReviewMeta = {
 
 export type ReviewEventView = {
   id: number;
-  runType: ReviewRunType;
+  runType: ReviewEventRunType;
   runId: number;
   level: ReviewEventLevel;
   step: string;
@@ -418,6 +421,43 @@ export class ReviewStateStore {
       }
     });
     return this.getProject(userId, projectId);
+  }
+
+  async getProjectReleaseNotesContext(userId: number, projectId: number): Promise<{ context: string }> {
+    void userId;
+    const project = await this.db.project.findFirst({
+      where: { id: projectId },
+      include: { gitlabProject: true }
+    });
+    if (!project) throw new Error("Project not found");
+    if (!project.gitlabProject) throw new Error("Shared GitLab project is not linked");
+    return { context: project.gitlabProject.releaseNotesContext ?? "" };
+  }
+
+  async getSharedProjectReleaseNotesContext(gitlabProjectRefId: number): Promise<string> {
+    const project = await this.db.gitlabProject.findUnique({
+      where: { id: gitlabProjectRefId },
+      select: { releaseNotesContext: true }
+    });
+    if (!project) throw new Error("GitLab project not found");
+    return project.releaseNotesContext ?? "";
+  }
+
+  async updateProjectReleaseNotesContext(userId: number, projectId: number, context: string): Promise<{ context: string }> {
+    void userId;
+    const project = await this.db.project.findFirst({ where: { id: projectId } });
+    if (!project) throw new Error("Project not found");
+    if (!project.gitlabProjectRefId) throw new Error("Shared GitLab project is not linked");
+
+    const normalized = context.trim();
+    await this.db.gitlabProject.update({
+      where: { id: project.gitlabProjectRefId },
+      data: {
+        releaseNotesContext: normalized || null,
+        updatedAt: nowIso()
+      }
+    });
+    return { context: normalized };
   }
 
   async getProjectReviewConfig(userId: number, projectId: number): Promise<ProjectReviewConfig> {
@@ -1350,7 +1390,7 @@ export class ReviewStateStore {
   }
 
   async addReviewEvent(input: {
-    runType: ReviewRunType;
+    runType: ReviewEventRunType;
     runId: number;
     level: ReviewEventLevel;
     step: string;
@@ -1638,9 +1678,15 @@ export class ReviewStateStore {
     });
   }
 
-  async listReviewEvents(userId: number, runType: ReviewRunType, runId: number): Promise<ReviewEventView[]> {
-    const run = runType === "mr" ? await this.getRunById(userId, runId) : await this.getCommitRunById(userId, runId);
-    if (!run) throw new Error("Review run not found");
+  async listReviewEvents(userId: number, runType: ReviewEventRunType, runId: number): Promise<ReviewEventView[]> {
+    if (runType === "release_note") {
+      void userId;
+      const entry = await this.db.releaseNoteEntry.findUnique({ where: { id: runId }, select: { id: true } });
+      if (!entry) throw new Error("Release note entry not found");
+    } else {
+      const run = runType === "mr" ? await this.getRunById(userId, runId) : await this.getCommitRunById(userId, runId);
+      if (!run) throw new Error("Review run not found");
+    }
 
     const rows = await this.db.reviewEvent.findMany({
       where: { runType, runId },
@@ -1961,6 +2007,7 @@ function projectFromRow(row: Project & { gitlabProject?: GitlabProject | null })
     reviewProfile: parseReviewProfile(gitlabProject?.reviewProfile),
     pathFilters: parseJsonArray(gitlabProject?.pathFiltersJson ?? JSON.stringify(defaultPathFilters())),
     releaseNotesEnabled: gitlabProject?.releaseNotesEnabled ?? false,
+    releaseNotesContext: gitlabProject?.releaseNotesContext ?? null,
     webhookStatus: webhookStatus(gitlabProject ?? null),
     webhookUrl: gitlabProject?.webhookUrl ?? null,
     webhookLastVerifiedAt: gitlabProject?.webhookLastVerifiedAt ?? null,
@@ -1990,6 +2037,7 @@ function gitlabProjectFromRow(row: GitlabProject): GitlabProjectRow {
     reviewProfile: parseReviewProfile(row.reviewProfile),
     pathFilters: parseJsonArray(row.pathFiltersJson),
     releaseNotesEnabled: row.releaseNotesEnabled,
+    releaseNotesContext: row.releaseNotesContext,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt
   };
@@ -2190,7 +2238,7 @@ function parseStructuredReleaseNoteJson(value: string | null | undefined): Struc
 function reviewEventFromRow(row: ReviewEvent): ReviewEventView {
   return {
     id: row.id,
-    runType: row.runType === "commit" ? "commit" : "mr",
+    runType: parseReviewEventRunType(row.runType),
     runId: row.runId,
     level: row.level === "error" ? "error" : row.level === "warn" ? "warn" : "info",
     step: row.step,
@@ -2198,6 +2246,11 @@ function reviewEventFromRow(row: ReviewEvent): ReviewEventView {
     metadata: parseJsonRecord(row.metadataJson),
     createdAt: row.createdAt
   };
+}
+
+function parseReviewEventRunType(value: string): ReviewEventRunType {
+  if (value === "commit" || value === "release_note") return value;
+  return "mr";
 }
 
 function reviewJobFromRow(row: ReviewJob): ReviewJobView {

@@ -14,13 +14,22 @@ describe("release note prompts", () => {
       ],
       diffText: "diff --git a/app.ts b/app.ts",
       diffTruncated: false,
-      omittedFiles: 0
+      omittedFiles: 0,
+      workingDirectory: "/workspaces/product",
+      changedFiles: ["app.ts"],
+      domainContext: "사용자는 입찰 운영 담당자이며 정산 정확도를 중요하게 봅니다."
     });
 
     expect(prompt).toContain("product release note writer");
     expect(prompt).toContain("개발자가 아닌");
     expect(prompt).toContain("v1.1.0부터 v1.2.0까지");
     expect(prompt).toContain("Improve dashboard loading");
+    expect(prompt).toContain("read-only tools");
+    expect(prompt).toContain("Do not run tests");
+    expect(prompt).toContain("app.ts");
+    expect(prompt).toContain("Domain Context");
+    expect(prompt).toContain("정산 정확도");
+    expect(prompt).toContain("Do not invent features or behavior");
   });
 
   it("renders structured release notes as markdown", () => {

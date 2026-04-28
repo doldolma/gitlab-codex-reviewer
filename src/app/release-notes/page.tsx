@@ -5,7 +5,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ExternalLink, Play, RefreshCw, X } from "lucide-react";
 import { AppShell } from "../../components/app-shell";
 import { GitLabProjectCombobox, TagCombobox } from "../../components/gitlab-combobox";
-import { apiGet, apiSend, type ReleaseNote, type ReviewJob } from "../../lib/api-client";
+import { ReleaseNoteProgressSummary, ReviewEventTimeline } from "../../components/review-event-timeline";
+import { apiGet, apiSend, type ReleaseNote, type ReviewEvent, type ReviewJob } from "../../lib/api-client";
 
 export default function ReleaseNotesPage() {
   const queryClient = useQueryClient();
@@ -151,8 +152,17 @@ function ReleaseNoteRow({ note, onSelect }: { note: ReleaseNote; onSelect: (note
 }
 
 function ReleaseNoteDrawer({ note, onClose }: { note: ReleaseNote | null; onClose: () => void }) {
+  const latestEntry = note?.entries[0] ?? null;
+  const events = useQuery({
+    queryKey: ["review-events", "release_note", latestEntry?.id],
+    queryFn: () => apiGet<{ events: ReviewEvent[] }>(`/api/release-notes/entries/${latestEntry!.id}/events`),
+    enabled: Boolean(latestEntry?.id),
+    refetchInterval: isActiveStatus(latestEntry?.status ?? note?.status ?? null) ? 1000 : false
+  });
+
   if (!note) return null;
   const externalUrl = note.releaseUrl ?? note.tagUrl;
+  const latestStatus = latestEntry?.status ?? note.status;
 
   return (
     <div className="drawer-backdrop" onClick={onClose}>
@@ -166,21 +176,33 @@ function ReleaseNoteDrawer({ note, onClose }: { note: ReleaseNote | null; onClos
             <X size={18} />
           </button>
         </header>
-        <dl className="detail-list">
-          <dt>프로젝트</dt>
-          <dd>{note.projectName}</dd>
-          <dt>태그</dt>
-          <dd className="mono">{note.tagName}</dd>
-          <dt>비교 기준</dt>
-          <dd>{note.previousTagName ?? "첫 v 태그"}</dd>
-          <dt>상태</dt>
-          <dd>{labelForStatus(note.status)}</dd>
-          <dt>작성 완료</dt>
-          <dd>{note.generatedAt ? new Date(note.generatedAt).toLocaleString() : "아직 없음"}</dd>
-        </dl>
+        <div className="review-detail-overview">
+          <dl className="detail-list">
+            <dt>프로젝트</dt>
+            <dd>{note.projectName}</dd>
+            <dt>태그</dt>
+            <dd className="mono">{note.tagName}</dd>
+            <dt>비교 기준</dt>
+            <dd>{note.previousTagName ?? "첫 v 태그"}</dd>
+            <dt>상태</dt>
+            <dd>{labelForStatus(note.status)}</dd>
+            <dt>작성 완료</dt>
+            <dd>{note.generatedAt ? new Date(note.generatedAt).toLocaleString() : "아직 없음"}</dd>
+          </dl>
+          <ReleaseNoteProgressSummary events={events.data?.events ?? []} status={latestStatus} />
+        </div>
         {note.errorMessage && <pre className="error-box">{note.errorMessage}</pre>}
         {note.status === "queued" && <div className="alert neutral">릴리즈노트 작성 대기 중입니다.</div>}
         {note.status === "running" && <div className="alert neutral">릴리즈노트를 작성하고 있습니다.</div>}
+        <section className="drawer-section">
+          <h3>실행 기록</h3>
+          <ReviewEventTimeline
+            events={events.data?.events ?? []}
+            isLoading={events.isLoading}
+            loadingText="릴리즈노트 이벤트를 불러오는 중..."
+            emptyText="아직 기록된 릴리즈노트 이벤트가 없습니다"
+          />
+        </section>
         {note.notesMarkdown && (
           <section className="drawer-section">
             <h3>릴리즈노트</h3>
@@ -254,6 +276,10 @@ function statusClass(status: string): string {
 
 function hasActiveNotes(notes: ReleaseNote[]): boolean {
   return notes.some((note) => note.status === "queued" || note.status === "running" || note.entries.some((entry) => entry.status === "queued" || entry.status === "running"));
+}
+
+function isActiveStatus(status: string | null): boolean {
+  return status === "queued" || status === "running";
 }
 
 function labelForTrigger(trigger: string): string {
