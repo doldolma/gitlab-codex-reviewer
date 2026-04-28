@@ -1,8 +1,8 @@
 # GitLab 설정
 
-이 문서는 GitLab OAuth application, Reviewer Bot Token, project 등록 방법을 정리합니다.
+이 문서는 GitLab OAuth application, Reviewer Bot Token, project 등록 흐름을 설명합니다.
 
-## OAuth application 생성
+## 1. OAuth Application 만들기
 
 GitLab.com 기준:
 
@@ -22,96 +22,69 @@ ${PUBLIC_BASE_URL}/api/auth/gitlab/callback
 https://reviewer.example.com/api/auth/gitlab/callback
 ```
 
-6. OAuth scope로 `api`를 선택합니다.
+6. Scope는 `api`를 선택합니다.
 7. 저장 후 Application ID를 `.env`의 `GITLAB_OAUTH_CLIENT_ID`에 넣습니다.
+8. application이 confidential client이면 secret을 `GITLAB_OAUTH_CLIENT_SECRET`에 넣습니다.
 
-Self-managed GitLab에서는 같은 메뉴가 사용자 프로필의 `Applications` 또는 관리자 설정의 application 영역에 있을 수 있습니다. 이 서비스에 로그인할 사용자들이 승인할 수 있는 OAuth application으로 등록되어 있어야 합니다.
+Self-managed GitLab에서는 메뉴 위치가 사용자 profile 또는 admin application 설정에 있을 수 있습니다. 앱에 로그인할 사용자가 승인할 수 있는 OAuth application으로 등록되어 있어야 합니다.
 
-## OAuth scope
-
-현재 구현은 OAuth login에 `api` scope를 요청합니다. 사용자 OAuth token은 주로 앱 로그인, project 검색, branch 목록 조회, 사용자별 감시 설정 관리에 사용됩니다.
-
-실제 background worker의 MR/commit 조회, repository clone/fetch/checkout, note/comment 작성은 사용자 OAuth token이 아니라 아래의 Reviewer Bot Token으로 수행합니다.
-
-## `.env` 설정
+## 2. `.env` 설정
 
 ```env
-GITLAB_BASE_URL=https://gitlab.com
-GITLAB_OAUTH_CLIENT_ID=<Application ID>
-GITLAB_OAUTH_CLIENT_SECRET=<Secret>
 PUBLIC_BASE_URL=https://reviewer.example.com
+GITLAB_BASE_URL=https://gitlab.example.com
+GITLAB_OAUTH_CLIENT_ID=<Application ID>
+GITLAB_OAUTH_CLIENT_SECRET=<optional secret>
 ```
 
-현재 구현은 Authorization Code + PKCE flow를 사용합니다. `GITLAB_OAUTH_CLIENT_SECRET`이 설정되어 있으면 token exchange와 refresh 요청에 함께 보냅니다. Self-managed GitLab에서 OAuth application이 confidential client로 동작하면 secret이 필요할 수 있습니다.
+`PUBLIC_BASE_URL`, 브라우저 접속 origin, GitLab OAuth Redirect URI는 같은 origin이어야 합니다. 로컬 기본값이 `http://127.0.0.1:3000`이면 `localhost:3000`이 아니라 `127.0.0.1:3000`으로 접속하세요.
 
-`PUBLIC_BASE_URL`과 GitLab OAuth Redirect URI와 실제 브라우저 접속 URL은 같은 origin이어야 합니다. 로컬에서 `PUBLIC_BASE_URL=http://127.0.0.1:3000`이면 `localhost:3000`으로 접속하지 말고 `127.0.0.1:3000`으로 접속합니다. 앱은 page 요청을 기준 origin으로 자동 redirect하지만, GitLab에 등록된 Redirect URI 자체도 기준 origin과 일치해야 합니다.
+## 3. 로그인과 역할
 
-## 로그인과 사용자 분리
+앱에서 `Continue with GitLab`을 누르면 GitLab OAuth login이 시작됩니다.
 
-서버를 처음 띄운 뒤 UI에서 `Continue with GitLab`을 누르면 GitLab OAuth 로그인이 시작됩니다.
+- 첫 로그인 사용자는 앱 내부 `admin` 역할을 받습니다.
+- 이후 로그인한 사용자는 기본 `user` 역할입니다.
+- `admin`은 Settings에서 사용자 역할, Codex 연결, Reviewer Bot Token을 관리합니다.
+- `user`는 자기 project와 review run을 관리하고 Codex 연결 상태를 확인합니다.
+- 마지막 남은 `admin`은 `user`로 바꿀 수 없습니다.
 
-로그인에 성공한 GitLab 사용자는 앱 내부 `users` 테이블에 `gitlab_host + gitlab_user_id` 기준으로 등록됩니다. 각 사용자의 GitLab token과 project subscription 설정은 분리됩니다.
+사용자 OAuth token은 로그인, project 검색, branch 조회, 사용자별 project subscription 관리에 사용됩니다. 실제 리뷰 실행과 GitLab 댓글 작성은 Reviewer Bot Token으로 수행합니다.
 
-같은 GitLab project를 여러 사용자가 각각 등록할 수 있습니다. 이 경우 각 사용자는 자기 subscription 설정만 관리하지만, background worker는 같은 GitLab project를 shared project로 묶어 한 번만 조회하고 한 번만 리뷰합니다. MR note와 commit comment는 Reviewer Bot Token 계정으로 작성됩니다.
+## 4. Reviewer Bot Token 만들기
 
-첫 GitLab 로그인 사용자는 앱 내부 `admin` 역할을 받습니다. 이후 로그인한 사용자는 기본 `user` 역할입니다.
-
-역할별 차이:
-
-- `admin`: Settings에서 사용자 역할을 변경하고, instance-wide Codex 연결/해제를 관리합니다.
-- `user`: 자기 project, MR, review run만 관리하고 Codex 연결 상태만 확인합니다.
-
-마지막 남은 `admin`은 `user`로 변경할 수 없습니다.
-
-## Reviewer Bot Token
-
-리뷰 댓글을 개인 계정이 아니라 전용 bot 계정 이름으로 남기려면 GitLab에 bot 용 일반 사용자를 하나 만들고 Personal Access Token을 발급합니다.
+리뷰 댓글을 개인 계정이 아니라 전용 bot 계정으로 남기려면 GitLab 사용자 계정을 하나 만들고 Personal Access Token을 발급합니다.
 
 권장 설정:
 
-- Bot 계정을 리뷰 대상 group/project에 `Developer` 이상으로 추가합니다.
+- Bot 계정을 리뷰 대상 group/project에 추가합니다.
+- MR/commit 조회와 댓글 작성에는 `Developer` 이상 권한이 필요합니다.
+- webhook 자동 생성까지 사용하려면 대상 project에서 `Maintainer` 이상 권한이 필요합니다.
 - PAT scope는 `api`와 `read_repository`를 부여합니다.
-- Webhook 자동 생성까지 사용하려면 대상 project에서 `Maintainer` 이상 권한이 필요합니다.
-- 전역 admin 권한은 권장하지 않습니다. 가능하면 필요한 group/project에만 멤버로 추가합니다.
+- 가능하면 필요한 group/project에만 권한을 부여하고 전역 admin 권한은 피합니다.
 
 앱에서 등록:
 
-1. 앱에 `admin` 사용자로 로그인합니다.
-2. `Settings` 화면의 `Reviewer Bot` 섹션으로 이동합니다.
-3. 발급한 PAT를 붙여 넣고 저장합니다.
+1. `admin` 사용자로 로그인합니다.
+2. Settings의 `Reviewer Bot` 섹션으로 이동합니다.
+3. PAT를 저장합니다.
 4. `Verify`로 `/api/v4/user` 검증이 성공하는지 확인합니다.
 
-token 원문은 저장 후 다시 표시하지 않습니다. DB에는 `.data/app-secrets.json`의 암호화 키로 암호화되어 저장됩니다.
+token 원문은 저장 후 다시 표시하지 않습니다. SQLite DB에는 `.data/app-secrets.json`의 암호화 키로 암호화되어 저장됩니다.
 
-Reviewer Bot Token은 다음 작업에 사용됩니다.
+## 5. Project 등록
 
-- opened MR 조회
-- MR diff 조회
-- branch/commit/compare 조회
-- project webhook 생성/갱신
-- repository clone/fetch/detached checkout
-- MR note 작성
-- commit comment 작성
-
-## Project 등록
-
-로그인 후 UI의 `Projects` 화면에서 감시할 GitLab project를 추가합니다.
+Projects 화면에서 감시할 GitLab project를 추가합니다.
 
 입력값:
 
-- GitLab project:
-  - 현재 로그인 사용자의 GitLab token으로 접근 가능한 project를 검색해서 선택합니다.
-  - 저장값은 안정적인 numeric project id입니다.
-- MR target branches:
-  - GitLab branch 목록에서 선택하거나 직접 입력할 수 있습니다.
-  - 예: `main, develop`
-  - 비워두면 MR 리뷰를 실행하지 않습니다.
-- Commit review branches:
-  - GitLab branch 목록에서 선택하거나 직접 입력할 수 있습니다.
-  - 예: `main, develop, release/1.0`
-  - 비워두면 commit 자동 리뷰는 실행하지 않습니다.
+- GitLab project: 현재 로그인 사용자가 접근 가능한 project를 검색해 선택합니다.
+- MR 리뷰 브랜치: 해당 target branch로 들어오는 opened MR만 리뷰합니다.
+- 커밋 리뷰 브랜치: 해당 branch에 새 commit이 들어오면 commit 단위로 리뷰합니다.
 
-project 등록 시 앱은 Reviewer Bot Token으로 `${PUBLIC_BASE_URL}/api/gitlab/webhook` Project Webhook 생성을 시도합니다. 같은 GitLab project를 여러 사용자가 등록해도 shared project당 hook은 하나만 유지합니다. webhook 생성에 실패해도 project 등록은 성공하며, Projects 화면의 Webhook 상태와 `webhookError`로 원인을 확인할 수 있습니다.
+MR 리뷰 브랜치가 비어 있으면 MR 자동 리뷰를 실행하지 않습니다. 커밋 리뷰 브랜치가 비어 있으면 commit 자동 리뷰를 실행하지 않습니다.
+
+project 등록 시 앱은 Reviewer Bot Token으로 `${PUBLIC_BASE_URL}/api/gitlab/webhook` Project Webhook 생성을 시도합니다. 실패해도 project 등록은 성공하며, Projects 화면에서 webhook 상태와 오류를 확인할 수 있습니다.
 
 Webhook 생성 조건:
 
@@ -120,45 +93,21 @@ Webhook 생성 조건:
 - Reviewer Bot 계정이 대상 project에서 `Maintainer` 이상이어야 합니다.
 - PAT scope에 `api`가 있어야 합니다.
 
-worker는 enabled subscription을 shared GitLab project 기준으로 묶어서 조회합니다. 같은 project를 여러 사용자가 등록해도 GitLab webhook 처리, fallback polling, workspace checkout, Codex 리뷰, 댓글 작성은 project당 한 번만 수행됩니다.
+## 6. Webhook과 Fallback Polling
 
-## MR 조회 조건
+일반 경로는 webhook입니다.
 
-현재 worker는 GitLab API를 다음 기준으로 호출합니다.
+- MR event가 오면 MR review job을 큐에 넣습니다.
+- push event가 오면 설정된 commit review branch인지 확인한 뒤 commit review job을 큐에 넣습니다.
 
-```text
-GET /projects/:id/merge_requests?state=opened&wip=no
-```
+Webhook이 누락되거나 서버가 잠시 내려간 경우를 위해 worker는 5분마다 fallback polling도 실행합니다. fallback polling은 project 설정과 branch 설정을 기준으로 놓친 MR/commit을 다시 확인합니다.
 
-`MR target branches`가 설정되어 있으면 branch별로 다음 query가 추가됩니다.
+## 7. Shared Project 규칙
 
-```text
-target_branch=<branch>
-```
+같은 GitLab project를 여러 사용자가 등록할 수 있습니다.
 
-따라서:
-
-- opened MR만 대상입니다.
-- Draft/WIP MR은 기본 제외됩니다.
-- `MR target branches`가 설정되어 있으면 해당 target branch로 들어오는 MR만 대상입니다.
-- Project별 skip label이 붙은 MR은 제외됩니다.
-- MR `sha`가 없으면 GitLab diff 준비가 끝나지 않은 것으로 보고 다음 polling까지 건너뜁니다.
-
-여러 사용자가 같은 shared project를 등록한 경우:
-
-- `MR target branches`는 사용자 subscription 전체를 병합합니다.
-- 비어 있는 subscription은 MR 리뷰 대상 branch를 추가하지 않습니다.
-- 병합 결과가 비어 있으면 해당 shared project의 MR 리뷰는 실행하지 않습니다.
-- skip label은 전체 subscription의 union으로 적용됩니다.
-
-## Commit 리뷰 조건
-
-`Commit review branches`가 설정된 project만 자동 commit review 대상입니다.
-
-- 첫 scan은 branch의 최신 SHA를 baseline으로 저장하고 리뷰하지 않습니다.
-- 이후 branch 최신 SHA가 바뀌면 compare API로 새 commit 목록을 가져옵니다.
-- 오래된 commit부터 diff와 workspace context 기반 리뷰를 실행합니다.
-- 리뷰가 완료되면 GitLab commit comment에 요약을 작성합니다.
-- actionable finding이 없으면 `no_findings`로 기록하고 “액션 필요한 이슈 없음” 요약 댓글을 남깁니다.
-
-테스트용으로 `Commit Reviews` 화면에서 GitLab project와 branch를 선택한 뒤 최신 commit 목록에서 commit을 고르면 감시 project가 아니어도 수동 commit review를 실행할 수 있습니다. 이때도 GitLab 조회와 댓글 작성은 Reviewer Bot Token으로 수행됩니다.
+- 각 사용자는 자기 subscription 설정만 관리합니다.
+- worker는 같은 GitLab numeric project id를 shared project로 묶어 한 번만 리뷰합니다.
+- MR target branch, commit review branch, skip label은 사용자 설정을 병합합니다.
+- 리뷰 댓글은 Reviewer Bot 계정으로 작성됩니다.
+- 각 사용자는 자기 subscription에 연결된 review 결과만 UI에서 봅니다.

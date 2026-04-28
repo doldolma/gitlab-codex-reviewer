@@ -149,7 +149,7 @@ export class GitLabWebhookService {
     const group = await this.state.getSharedProjectGroup(project.id);
     if (!group) return { accepted: true, queued: 0, skipped: 1, reason: "No enabled subscriptions for project" };
 
-    if (eventName === "Push Hook") {
+    if (eventName === "Push Hook" || eventName === "Tag Push Hook") {
       return this.handlePush(group, payload as PushPayload);
     }
     if (eventName === "Merge Request Hook") {
@@ -160,6 +160,9 @@ export class GitLabWebhookService {
   }
 
   private async handlePush(group: SharedProjectGroup, payload: PushPayload): Promise<WebhookHandleResult> {
+    const tagName = tagNameFromRef(payload.ref);
+    if (tagName) return this.handleTagPush(group, tagName, payload);
+
     const branchName = branchNameFromRef(payload.ref);
     if (!branchName) return { accepted: true, queued: 0, skipped: 1, reason: "Push event has no branch ref" };
     if (!group.commitBranches.includes(branchName)) {
@@ -209,6 +212,42 @@ export class GitLabWebhookService {
     }
 
     return { accepted: true, queued, skipped, reason: queued ? undefined : "No new commits to queue" };
+  }
+
+  private async handleTagPush(group: SharedProjectGroup, tagName: string, payload: PushPayload): Promise<WebhookHandleResult> {
+    if (!group.gitlabProject.releaseNotesEnabled) {
+      return { accepted: true, queued: 0, skipped: 1, reason: "Release notes are disabled for this project" };
+    }
+    if (!isReleaseTagName(tagName)) {
+      return { accepted: true, queued: 0, skipped: 1, reason: `Tag is not a release tag: ${tagName}` };
+    }
+
+    const tagSha = tagShaFromPayload(payload);
+    if (!tagSha) return { accepted: true, queued: 0, skipped: 1, reason: "Tag push is a delete event or missing tag sha" };
+
+    const { releaseNote, entry } = await this.state.createQueuedReleaseNote({
+      gitlabProjectRefId: group.gitlabProject.id,
+      gitlabProjectId: group.gitlabProject.gitlabProjectId,
+      projectName: projectDisplayName(group),
+      tagName,
+      tagSha,
+      tagUrl: tagWebUrl(group.gitlabProject.webUrl, tagName),
+      trigger: "webhook",
+      createdByUserId: group.representative.userId
+    });
+    await this.state.createReviewJob({
+      kind: "release_note_webhook",
+      userId: group.representative.userId,
+      payload: {
+        releaseNoteId: releaseNote.id,
+        releaseNoteEntryId: entry.id,
+        gitlabProjectRefId: group.gitlabProject.id,
+        gitlabProjectId: group.gitlabProject.gitlabProjectId,
+        tagName,
+        tagSha
+      }
+    });
+    return { accepted: true, queued: 1, skipped: 0 };
   }
 
   private async handleMergeRequest(group: SharedProjectGroup, payload: MergeRequestPayload): Promise<WebhookHandleResult> {
@@ -286,6 +325,12 @@ function branchNameFromRef(ref: string | undefined): string | null {
   return ref.slice(prefix.length);
 }
 
+function tagNameFromRef(ref: string | undefined): string | null {
+  const prefix = "refs/tags/";
+  if (!ref?.startsWith(prefix)) return null;
+  return ref.slice(prefix.length);
+}
+
 function commitsFromPushPayload(payload: PushPayload): GitLabCommit[] {
   const commits = (payload.commits ?? [])
     .map((commit) => commitFromPushCommit(commit))
@@ -340,6 +385,25 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isZeroSha(sha: string): boolean {
   return /^0+$/.test(sha);
+}
+
+function tagShaFromPayload(payload: PushPayload): string | null {
+  const sha = payload.checkout_sha || payload.after;
+  if (!sha || isZeroSha(sha)) return null;
+  return sha;
+}
+
+function isReleaseTagName(tagName: string): boolean {
+  return tagName.startsWith("v");
+}
+
+function tagWebUrl(projectWebUrl: string | null, tagName: string): string | null {
+  if (!projectWebUrl) return null;
+  return `${projectWebUrl.replace(/\/$/, "")}/-/tags/${encodeURIComponent(tagName)}`;
+}
+
+function projectDisplayName(group: SharedProjectGroup): string {
+  return group.gitlabProject.nameWithNamespace ?? group.gitlabProject.pathWithNamespace ?? group.representative.displayName;
 }
 
 function shortSha(sha: string): string {

@@ -133,6 +133,7 @@ describe("GitLabClient discovery helpers", () => {
         url: "https://reviewer.example.com/api/gitlab/webhook",
         token: "hook-secret",
         push_events: true,
+        tag_push_events: true,
         merge_requests_events: true,
         enable_ssl_verification: true,
         name: "GitLab Codex Reviewer"
@@ -148,6 +149,79 @@ describe("GitLabClient discovery helpers", () => {
     });
 
     expect(hook.id).toBe(99);
+  });
+
+  it("lists tags for release note generation", async () => {
+    const fetchMock = vi.fn(async (url: URL | RequestInfo) => {
+      const requestUrl = new URL(String(url));
+      expect(requestUrl.pathname).toBe("/api/v4/projects/group%2Freviewer/repository/tags");
+      expect(requestUrl.searchParams.get("per_page")).toBe("100");
+      expect(requestUrl.searchParams.get("order_by")).toBe("updated");
+      expect(requestUrl.searchParams.get("sort")).toBe("desc");
+      return new Response(JSON.stringify([{ name: "v1.2.0", target: "abc123", commit: { id: "abc123" } }]), {
+        status: 200,
+        headers: { "x-next-page": "" }
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const tags = await new GitLabClient(connection).listTags("group/reviewer");
+
+    expect(tags[0]?.name).toBe("v1.2.0");
+  });
+
+  it("compares refs with commits and diffs for release notes", async () => {
+    const fetchMock = vi.fn(async (url: URL | RequestInfo) => {
+      const requestUrl = new URL(String(url));
+      expect(requestUrl.pathname).toBe("/api/v4/projects/group%2Freviewer/repository/compare");
+      expect(requestUrl.searchParams.get("from")).toBe("v1.1.0");
+      expect(requestUrl.searchParams.get("to")).toBe("v1.2.0");
+      expect(requestUrl.searchParams.get("straight")).toBe("true");
+      return new Response(
+        JSON.stringify({
+          commits: [{ id: "abc123", title: "Add user-visible feature" }],
+          diffs: [{ old_path: "a.txt", new_path: "a.txt", new_file: false, renamed_file: false, deleted_file: false, diff: "@@" }]
+        }),
+        { status: 200 }
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const compare = await new GitLabClient(connection).compareRefs("group/reviewer", "v1.1.0", "v1.2.0");
+
+    expect(compare.commits[0]?.id).toBe("abc123");
+    expect(compare.diffs[0]?.new_path).toBe("a.txt");
+  });
+
+  it("creates and updates GitLab releases with markdown descriptions", async () => {
+    const fetchMock = vi.fn(async (url: URL | RequestInfo, init?: RequestInit) => {
+      const requestUrl = new URL(String(url));
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : null;
+      if (init?.method === "POST") {
+        expect(requestUrl.pathname).toBe("/api/v4/projects/group%2Freviewer/releases");
+        expect(body).toMatchObject({ tag_name: "v1.2.0", name: "v1.2.0 릴리즈", description: "# 릴리즈" });
+        return new Response(JSON.stringify({ tag_name: "v1.2.0", name: body?.name, description: body?.description }), { status: 201 });
+      }
+      expect(init?.method).toBe("PUT");
+      expect(requestUrl.pathname).toBe("/api/v4/projects/group%2Freviewer/releases/v1.2.0");
+      expect(body).toMatchObject({ name: "기존 릴리즈", description: "기존 설명\n\n추가 설명" });
+      return new Response(JSON.stringify({ tag_name: "v1.2.0", name: body?.name, description: body?.description }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new GitLabClient(connection);
+    const created = await client.createRelease("group/reviewer", {
+      tagName: "v1.2.0",
+      name: "v1.2.0 릴리즈",
+      description: "# 릴리즈"
+    });
+    const updated = await client.updateRelease("group/reviewer", "v1.2.0", {
+      name: "기존 릴리즈",
+      description: "기존 설명\n\n추가 설명"
+    });
+
+    expect(created.tag_name).toBe("v1.2.0");
+    expect(updated.description).toContain("추가 설명");
   });
 
   it("deletes project webhooks", async () => {

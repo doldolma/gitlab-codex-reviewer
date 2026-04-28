@@ -3,7 +3,7 @@
 import { type KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { X } from "lucide-react";
-import { apiGet, type GitLabBranchOption, type GitLabCommitOption, type GitLabProjectOption } from "../lib/api-client";
+import { apiGet, type GitLabBranchOption, type GitLabCommitOption, type GitLabProjectOption, type GitLabTagOption } from "../lib/api-client";
 
 export function GitLabProjectCombobox({
   value,
@@ -273,6 +273,51 @@ export function CommitCombobox({
   );
 }
 
+export function TagCombobox({
+  projectId,
+  value,
+  onChange,
+  placeholder = "태그 선택"
+}: {
+  projectId: string;
+  value: string;
+  onChange: (value: string) => void;
+  placeholder?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [selectedTag, setSelectedTag] = useState<GitLabTagOption | null>(null);
+  const tags = useTags(projectId, open);
+
+  useEffect(() => {
+    if (!value) setSelectedTag(null);
+  }, [value]);
+
+  function selectTag(tag: GitLabTagOption) {
+    setSelectedTag(tag);
+    onChange(tag.name);
+    setOpen(false);
+  }
+
+  const displayValue = value
+    ? selectedTag
+      ? `${selectedTag.name}${selectedTag.createdAt ? ` · ${new Date(selectedTag.createdAt).toLocaleDateString()}` : ""}`
+      : value
+    : "";
+
+  return (
+    <div className="combobox" onBlur={() => window.setTimeout(() => setOpen(false), 120)}>
+      <input
+        value={displayValue}
+        placeholder={placeholder}
+        readOnly
+        disabled={!projectId.trim()}
+        onFocus={() => setOpen(true)}
+      />
+      {open && <TagMenu projectId={projectId} tags={tags} selectedName={value} onSelect={selectTag} />}
+    </div>
+  );
+}
+
 function BranchMenu({
   projectId,
   branches,
@@ -366,6 +411,48 @@ function CommitMenu({
   );
 }
 
+function TagMenu({
+  projectId,
+  tags,
+  selectedName,
+  onSelect
+}: {
+  projectId: string;
+  tags: ReturnType<typeof useTags>;
+  selectedName: string;
+  onSelect: (tag: GitLabTagOption) => void;
+}) {
+  if (!projectId.trim()) {
+    return <div className="combobox-menu"><div className="combobox-message">프로젝트를 먼저 선택하세요.</div></div>;
+  }
+
+  const options = tags.data?.tags ?? [];
+
+  return (
+    <div className="combobox-menu">
+      {tags.isLoading && <div className="combobox-message">태그를 불러오는 중</div>}
+      {tags.isError && <div className="combobox-message bad">태그 조회에 실패했습니다.</div>}
+      {!tags.isLoading &&
+        !tags.isError &&
+        options.map((tag) => (
+          <button
+            key={tag.name}
+            type="button"
+            className={`combobox-option${tag.name === selectedName ? " selected" : ""}`}
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => onSelect(tag)}
+          >
+            <strong>{tag.name}</strong>
+            <span>{[tag.commitSha?.slice(0, 12), tag.createdAt ? new Date(tag.createdAt).toLocaleString() : null].filter(Boolean).join(" · ")}</span>
+          </button>
+        ))}
+      {!tags.isLoading && !tags.isError && !options.length && (
+        <div className="combobox-message">v로 시작하는 태그를 찾지 못했습니다.</div>
+      )}
+    </div>
+  );
+}
+
 function useBranches(projectId: string, search: string, open: boolean) {
   return useQuery({
     queryKey: ["gitlab-branch-options", projectId, search],
@@ -385,6 +472,14 @@ function useCommits(projectId: string, branchName: string, open: boolean) {
         `/api/gitlab/commits?projectId=${encodeURIComponent(projectId)}&branchName=${encodeURIComponent(branchName)}`
       ),
     enabled: open && Boolean(projectId.trim()) && Boolean(branchName.trim())
+  });
+}
+
+function useTags(projectId: string, open: boolean) {
+  return useQuery({
+    queryKey: ["gitlab-tag-options", projectId],
+    queryFn: () => apiGet<{ tags: GitLabTagOption[] }>(`/api/gitlab/tags?projectId=${encodeURIComponent(projectId)}`),
+    enabled: open && Boolean(projectId.trim())
   });
 }
 

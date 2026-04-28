@@ -75,6 +75,7 @@ export type Project = {
   reviewStrategyUpdatedAt: string | null;
   reviewProfile: ReviewProfile;
   pathFilters: string[];
+  releaseNotesEnabled: boolean;
   webhookStatus: "connected" | "error" | "missing";
   webhookUrl: string | null;
   webhookLastVerifiedAt: string | null;
@@ -182,6 +183,45 @@ export type CommitReview = {
   reviewMeta: ReviewMeta | null;
 };
 
+export type ReleaseNote = {
+  id: number;
+  gitlabProjectRefId: number;
+  gitlabProjectId: string;
+  projectName: string;
+  tagName: string;
+  tagSha: string;
+  tagUrl: string | null;
+  releaseUrl: string | null;
+  previousTagName: string | null;
+  previousTagSha: string | null;
+  commitCount: number;
+  status: string;
+  title: string | null;
+  notesMarkdown: string | null;
+  errorMessage: string | null;
+  generatedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  entries: ReleaseNoteEntry[];
+};
+
+export type ReleaseNoteEntry = {
+  id: number;
+  releaseNoteId: number;
+  createdByUserId: number | null;
+  trigger: string;
+  status: string;
+  title: string | null;
+  notesMarkdown: string | null;
+  previousTagName: string | null;
+  previousTagSha: string | null;
+  commitCount: number;
+  errorMessage: string | null;
+  generatedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type ReviewEvent = {
   id: number;
   runType: "mr" | "commit";
@@ -195,7 +235,16 @@ export type ReviewEvent = {
 
 export type ReviewJob = {
   id: number;
-  kind: "commit_manual" | "commit_retry" | "mr_retry" | "scan_user" | "commit_webhook" | "mr_webhook" | string;
+  kind:
+    | "commit_manual"
+    | "commit_retry"
+    | "mr_retry"
+    | "scan_user"
+    | "commit_webhook"
+    | "mr_webhook"
+    | "release_note_webhook"
+    | "release_note_manual"
+    | string;
   status: "queued" | "running" | "completed" | "failed" | "canceled" | string;
   userId: number;
   runType: "mr" | "commit" | null;
@@ -232,6 +281,15 @@ export type GitLabCommitOption = {
   webUrl: string | null;
   authorName: string | null;
   committedDate: string | null;
+};
+
+export type GitLabTagOption = {
+  name: string;
+  target: string | null;
+  message: string | null;
+  commitSha: string | null;
+  createdAt: string | null;
+  webUrl: string | null;
 };
 
 export type Dashboard = {

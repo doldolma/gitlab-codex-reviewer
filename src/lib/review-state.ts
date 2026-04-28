@@ -1,10 +1,23 @@
-import type { BranchWatchState, CommitReviewRun, GitlabProject, MergeRequest, Project, ProjectReviewInstruction as PrismaProjectReviewInstruction, ReviewEvent, ReviewJob, ReviewRun } from "@prisma/client";
+import type {
+  BranchWatchState,
+  CommitReviewRun,
+  GitlabProject,
+  MergeRequest,
+  Project,
+  ProjectReviewInstruction as PrismaProjectReviewInstruction,
+  ReleaseNote,
+  ReleaseNoteEntry,
+  ReviewEvent,
+  ReviewJob,
+  ReviewRun
+} from "@prisma/client";
 import type { Db } from "./prisma";
 import { nowIso } from "./prisma";
 import type { GitLabCommit, GitLabMergeRequest } from "./gitlab-client";
 import { parseReviewStrategy, type ReviewStrategy } from "./review-strategy";
 import { defaultPathFilters, normalizeInstructions, normalizePathFilters, parseReviewProfile, type ProjectReviewConfig, type ReviewProfile } from "./review-config";
 import type { StructuredReview } from "./prompts";
+import type { StructuredReleaseNote } from "./release-note-prompts";
 
 export type ProjectRow = {
   id: number;
@@ -22,6 +35,7 @@ export type ProjectRow = {
   reviewStrategyUpdatedAt: string | null;
   reviewProfile: ReviewProfile;
   pathFilters: string[];
+  releaseNotesEnabled: boolean;
   webhookStatus: "connected" | "error" | "missing";
   webhookUrl: string | null;
   webhookLastVerifiedAt: string | null;
@@ -48,6 +62,7 @@ export type GitlabProjectRow = {
   reviewStrategyUpdatedAt: string | null;
   reviewProfile: ReviewProfile;
   pathFilters: string[];
+  releaseNotesEnabled: boolean;
   createdAt: string;
   updatedAt: string;
 };
@@ -146,7 +161,15 @@ export type ReviewFeedbackRating = "helpful" | "false_positive" | "too_minor" | 
 
 export type ReviewRunType = "mr" | "commit";
 export type ReviewEventLevel = "info" | "warn" | "error";
-export type ReviewJobKind = "commit_manual" | "commit_retry" | "mr_retry" | "scan_user" | "commit_webhook" | "mr_webhook";
+export type ReviewJobKind =
+  | "commit_manual"
+  | "commit_retry"
+  | "mr_retry"
+  | "scan_user"
+  | "commit_webhook"
+  | "mr_webhook"
+  | "release_note_webhook"
+  | "release_note_manual";
 export type ReviewJobStatus = "queued" | "running" | "completed" | "failed" | "canceled";
 
 export type ReviewMeta = {
@@ -188,6 +211,47 @@ export type ReviewJobView = {
   updatedAt: string;
   startedAt: string | null;
   finishedAt: string | null;
+};
+
+export type ReleaseNoteView = {
+  id: number;
+  gitlabProjectRefId: number;
+  gitlabProjectId: string;
+  projectName: string;
+  tagName: string;
+  tagSha: string;
+  tagUrl: string | null;
+  releaseUrl: string | null;
+  previousTagName: string | null;
+  previousTagSha: string | null;
+  commitCount: number;
+  status: string;
+  title: string | null;
+  notesMarkdown: string | null;
+  structured: StructuredReleaseNote | null;
+  errorMessage: string | null;
+  generatedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  entries: ReleaseNoteEntryView[];
+};
+
+export type ReleaseNoteEntryView = {
+  id: number;
+  releaseNoteId: number;
+  createdByUserId: number | null;
+  trigger: string;
+  status: string;
+  title: string | null;
+  notesMarkdown: string | null;
+  structured: StructuredReleaseNote | null;
+  previousTagName: string | null;
+  previousTagSha: string | null;
+  commitCount: number;
+  errorMessage: string | null;
+  generatedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
 };
 
 export class ReviewStateStore {
@@ -333,6 +397,24 @@ export class ReviewStateStore {
         reviewStrategyUpdatedByUserId: userId,
         reviewStrategyUpdatedAt: timestamp,
         updatedAt: timestamp
+      }
+    });
+    return this.getProject(userId, projectId);
+  }
+
+  async updateGitlabProjectReleaseNotesEnabled(userId: number, projectId: number, enabled: boolean): Promise<ProjectRow> {
+    const project = await this.db.project.findFirst({
+      where: { id: projectId },
+      include: { gitlabProject: true }
+    });
+    if (!project) throw new Error("Project not found");
+    if (!project.gitlabProjectRefId) throw new Error("Shared GitLab project is not linked");
+
+    await this.db.gitlabProject.update({
+      where: { id: project.gitlabProjectRefId },
+      data: {
+        releaseNotesEnabled: enabled,
+        updatedAt: nowIso()
       }
     });
     return this.getProject(userId, projectId);
@@ -1073,6 +1155,200 @@ export class ReviewStateStore {
     });
   }
 
+  async findReleaseNoteByTag(gitlabProjectRefId: number, tagName: string): Promise<ReleaseNoteView | null> {
+    const row = await this.db.releaseNote.findFirst({
+      where: { gitlabProjectRefId, tagName },
+      include: { entries: { orderBy: [{ createdAt: "desc" }, { id: "desc" }] } }
+    });
+    return row ? releaseNoteFromRow(row) : null;
+  }
+
+  async createQueuedReleaseNote(input: {
+    gitlabProjectRefId: number;
+    gitlabProjectId: string;
+    projectName: string;
+    tagName: string;
+    tagSha: string;
+    tagUrl?: string | null;
+    trigger: "webhook" | "manual";
+    createdByUserId?: number | null;
+  }): Promise<{ releaseNote: ReleaseNoteView; entry: ReleaseNoteEntryView }> {
+    const timestamp = nowIso();
+    const existing = await this.findReleaseNoteByTag(input.gitlabProjectRefId, input.tagName);
+    if (existing) {
+      const updated = await this.db.releaseNote.update({
+        where: { id: existing.id },
+        data: {
+          tagSha: input.tagSha,
+          tagUrl: input.tagUrl ?? existing.tagUrl,
+          status: "queued",
+          errorMessage: null,
+          updatedAt: timestamp
+        }
+      });
+      const entry = await this.db.releaseNoteEntry.create({
+        data: {
+          releaseNoteId: existing.id,
+          createdByUserId: input.createdByUserId ?? null,
+          trigger: input.trigger,
+          status: "queued",
+          createdAt: timestamp,
+          updatedAt: timestamp
+        }
+      });
+      const releaseNote = await this.getReleaseNote(updated.id);
+      if (!releaseNote) throw new Error("Release note was not found");
+      return { releaseNote, entry: releaseNoteEntryFromRow(entry) };
+    }
+
+    const row = await this.db.releaseNote.create({
+      data: {
+        gitlabProjectRefId: input.gitlabProjectRefId,
+        gitlabProjectId: input.gitlabProjectId,
+        projectName: input.projectName,
+        tagName: input.tagName,
+        tagSha: input.tagSha,
+        tagUrl: input.tagUrl ?? null,
+        status: "queued",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        entries: {
+          create: {
+            createdByUserId: input.createdByUserId ?? null,
+            trigger: input.trigger,
+            status: "queued",
+            createdAt: timestamp,
+            updatedAt: timestamp
+          }
+        }
+      }
+    });
+    const releaseNote = await this.getReleaseNote(row.id);
+    const entry = releaseNote?.entries[0];
+    if (!releaseNote || !entry) throw new Error("Release note entry was not created");
+    return { releaseNote, entry };
+  }
+
+  async markReleaseNoteEntryRunning(entryId: number): Promise<ReleaseNoteEntryView> {
+    const timestamp = nowIso();
+    const row = await this.db.releaseNoteEntry.update({
+      where: { id: entryId },
+      data: {
+        status: "running",
+        errorMessage: null,
+        updatedAt: timestamp,
+        releaseNote: {
+          update: {
+            status: "running",
+            errorMessage: null,
+            updatedAt: timestamp
+          }
+        }
+      }
+    });
+    return releaseNoteEntryFromRow(row);
+  }
+
+  async finishReleaseNoteEntry(
+    entryId: number,
+    input: {
+      title: string;
+      notesMarkdown: string;
+      structured: StructuredReleaseNote;
+      previousTagName?: string | null;
+      previousTagSha?: string | null;
+      commitCount: number;
+      releaseUrl?: string | null;
+    }
+  ): Promise<ReleaseNoteEntryView> {
+    const timestamp = nowIso();
+    const entry = await this.db.releaseNoteEntry.update({
+      where: { id: entryId },
+      data: {
+        status: "completed",
+        title: input.title,
+        notesMarkdown: input.notesMarkdown,
+        structuredJson: JSON.stringify(input.structured),
+        previousTagName: input.previousTagName ?? null,
+        previousTagSha: input.previousTagSha ?? null,
+        commitCount: input.commitCount,
+        errorMessage: null,
+        generatedAt: timestamp,
+        updatedAt: timestamp,
+        releaseNote: {
+          update: {
+            status: "completed",
+            title: input.title,
+            notesMarkdown: input.notesMarkdown,
+            structuredJson: JSON.stringify(input.structured),
+            previousTagName: input.previousTagName ?? null,
+            previousTagSha: input.previousTagSha ?? null,
+            commitCount: input.commitCount,
+            releaseUrl: input.releaseUrl ?? null,
+            errorMessage: null,
+            generatedAt: timestamp,
+            updatedAt: timestamp
+          }
+        }
+      }
+    });
+    return releaseNoteEntryFromRow(entry);
+  }
+
+  async failReleaseNoteEntry(entryId: number, error: unknown): Promise<void> {
+    const timestamp = nowIso();
+    const message = error instanceof Error ? error.message : String(error);
+    await this.db.releaseNoteEntry.updateMany({
+      where: { id: entryId },
+      data: {
+        status: "failed",
+        errorMessage: message,
+        updatedAt: timestamp
+      }
+    });
+    const entry = await this.db.releaseNoteEntry.findUnique({ where: { id: entryId } });
+    if (entry) {
+      await this.db.releaseNote.updateMany({
+        where: { id: entry.releaseNoteId },
+        data: {
+          status: "failed",
+          errorMessage: message,
+          updatedAt: timestamp
+        }
+      });
+    }
+  }
+
+  async failReleaseNote(id: number, error: unknown): Promise<void> {
+    const timestamp = nowIso();
+    const message = error instanceof Error ? error.message : String(error);
+    await this.db.releaseNote.updateMany({
+      where: { id },
+      data: {
+        status: "failed",
+        errorMessage: message,
+        updatedAt: timestamp
+      }
+    });
+  }
+
+  async getReleaseNote(id: number): Promise<ReleaseNoteView | null> {
+    const row = await this.db.releaseNote.findUnique({
+      where: { id },
+      include: { entries: { orderBy: [{ createdAt: "desc" }, { id: "desc" }] } }
+    });
+    return row ? releaseNoteFromRow(row) : null;
+  }
+
+  async listReleaseNotes(userId: number): Promise<ReleaseNoteView[]> {
+    void userId;
+    const rows = await this.db.releaseNote.findMany({
+      include: { entries: { orderBy: [{ createdAt: "desc" }, { id: "desc" }] } },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }]
+    });
+    return rows.map(releaseNoteFromRow);
+  }
+
   async addReviewEvent(input: {
     runType: ReviewRunType;
     runId: number;
@@ -1203,6 +1479,31 @@ export class ReviewStateStore {
           }
         });
       }
+      if (isReleaseNoteJobKind(row.kind)) {
+        const payload = parseJsonRecord(row.payloadJson);
+        const releaseNoteEntryId = numberFromMetadata(payload, "releaseNoteEntryId");
+        if (releaseNoteEntryId) {
+          await this.db.releaseNoteEntry.updateMany({
+            where: { id: releaseNoteEntryId, status: "running" },
+            data: {
+              status: "queued",
+              errorMessage: "Recovered stale running release note job after worker restart or heartbeat timeout",
+              updatedAt: timestamp
+            }
+          });
+        }
+        const releaseNoteId = numberFromMetadata(payload, "releaseNoteId");
+        if (releaseNoteId) {
+          await this.db.releaseNote.updateMany({
+            where: { id: releaseNoteId, status: "running" },
+            data: {
+              status: "queued",
+              errorMessage: "Recovered stale running release note job after worker restart or heartbeat timeout",
+              updatedAt: timestamp
+            }
+          });
+        }
+      }
       if ((row.runType === "commit" || row.runType === "mr") && row.runId) {
         await this.addReviewEvent({
           runType: row.runType,
@@ -1234,6 +1535,9 @@ export class ReviewStateStore {
     const commitSha = stringFromMetadata(payload, "commitSha");
     const mrIid = numberFromMetadata(payload, "mrIid");
     const headSha = stringFromMetadata(payload, "headSha");
+    const releaseNoteId = numberFromMetadata(payload, "releaseNoteId");
+    const releaseNoteEntryId = numberFromMetadata(payload, "releaseNoteEntryId");
+    const tagName = stringFromMetadata(payload, "tagName");
     const lockKeys = new Set<string>();
 
     if (gitlabProjectRefId) {
@@ -1242,7 +1546,18 @@ export class ReviewStateStore {
         lockKeys.add(`project:${project.gitlabHost}:${project.gitlabProjectId}`);
         if (job.runType === "commit" && commitSha) lockKeys.add(`commit:${project.id}:${commitSha}`);
         if (job.runType === "mr" && mrIid && headSha) lockKeys.add(`mr:${project.id}:${mrIid}:${headSha}`);
+        if (isReleaseNoteJobKind(job.kind) && tagName) lockKeys.add(`release-note:${project.id}:${tagName}`);
       }
+    }
+
+    if (isReleaseNoteJobKind(job.kind) && releaseNoteId) {
+      const releaseNote = await this.db.releaseNote.findUnique({ where: { id: releaseNoteId } });
+      if (releaseNote) lockKeys.add(`release-note:${releaseNote.gitlabProjectRefId}:${releaseNote.tagName}`);
+    }
+
+    if (isReleaseNoteJobKind(job.kind) && releaseNoteEntryId) {
+      const entry = await this.db.releaseNoteEntry.findUnique({ where: { id: releaseNoteEntryId }, include: { releaseNote: true } });
+      if (entry) lockKeys.add(`release-note:${entry.releaseNote.gitlabProjectRefId}:${entry.releaseNote.tagName}`);
     }
 
     if (job.runType === "commit" && gitlabProjectId && commitSha) {
@@ -1568,6 +1883,7 @@ export class ReviewStateStore {
     await this.db.reviewEvent.deleteMany();
     await this.db.reviewJob.deleteMany();
     await this.db.reviewLock.deleteMany();
+    await this.db.releaseNote.deleteMany();
     await this.db.reviewRun.deleteMany();
     await this.db.commitReviewRun.deleteMany();
     await this.db.mergeRequest.deleteMany();
@@ -1644,6 +1960,7 @@ function projectFromRow(row: Project & { gitlabProject?: GitlabProject | null })
     reviewStrategyUpdatedAt: gitlabProject?.reviewStrategyUpdatedAt ?? null,
     reviewProfile: parseReviewProfile(gitlabProject?.reviewProfile),
     pathFilters: parseJsonArray(gitlabProject?.pathFiltersJson ?? JSON.stringify(defaultPathFilters())),
+    releaseNotesEnabled: gitlabProject?.releaseNotesEnabled ?? false,
     webhookStatus: webhookStatus(gitlabProject ?? null),
     webhookUrl: gitlabProject?.webhookUrl ?? null,
     webhookLastVerifiedAt: gitlabProject?.webhookLastVerifiedAt ?? null,
@@ -1672,6 +1989,7 @@ function gitlabProjectFromRow(row: GitlabProject): GitlabProjectRow {
     reviewStrategyUpdatedAt: row.reviewStrategyUpdatedAt,
     reviewProfile: parseReviewProfile(row.reviewProfile),
     pathFilters: parseJsonArray(row.pathFiltersJson),
+    releaseNotesEnabled: row.releaseNotesEnabled,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt
   };
@@ -1815,6 +2133,60 @@ function parseStructuredReviewJson(value: string | null | undefined): Structured
   }
 }
 
+function releaseNoteFromRow(row: ReleaseNote & { entries?: ReleaseNoteEntry[] }): ReleaseNoteView {
+  return {
+    id: row.id,
+    gitlabProjectRefId: row.gitlabProjectRefId,
+    gitlabProjectId: row.gitlabProjectId,
+    projectName: row.projectName,
+    tagName: row.tagName,
+    tagSha: row.tagSha,
+    tagUrl: row.tagUrl,
+    releaseUrl: row.releaseUrl,
+    previousTagName: row.previousTagName,
+    previousTagSha: row.previousTagSha,
+    commitCount: row.commitCount,
+    status: row.status,
+    title: row.title,
+    notesMarkdown: row.notesMarkdown,
+    structured: parseStructuredReleaseNoteJson(row.structuredJson),
+    errorMessage: row.errorMessage,
+    generatedAt: row.generatedAt,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    entries: (row.entries ?? []).map(releaseNoteEntryFromRow)
+  };
+}
+
+function releaseNoteEntryFromRow(row: ReleaseNoteEntry): ReleaseNoteEntryView {
+  return {
+    id: row.id,
+    releaseNoteId: row.releaseNoteId,
+    createdByUserId: row.createdByUserId,
+    trigger: row.trigger,
+    status: row.status,
+    title: row.title,
+    notesMarkdown: row.notesMarkdown,
+    structured: parseStructuredReleaseNoteJson(row.structuredJson),
+    previousTagName: row.previousTagName,
+    previousTagSha: row.previousTagSha,
+    commitCount: row.commitCount,
+    errorMessage: row.errorMessage,
+    generatedAt: row.generatedAt,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt
+  };
+}
+
+function parseStructuredReleaseNoteJson(value: string | null | undefined): StructuredReleaseNote | null {
+  if (!value) return null;
+  try {
+    return JSON.parse(value) as StructuredReleaseNote;
+  } catch {
+    return null;
+  }
+}
+
 function reviewEventFromRow(row: ReviewEvent): ReviewEventView {
   return {
     id: row.id,
@@ -1853,8 +2225,14 @@ function isReviewJobKind(value: string): value is ReviewJobKind {
     value === "mr_retry" ||
     value === "scan_user" ||
     value === "commit_webhook" ||
-    value === "mr_webhook"
+    value === "mr_webhook" ||
+    value === "release_note_webhook" ||
+    value === "release_note_manual"
   );
+}
+
+function isReleaseNoteJobKind(value: string): boolean {
+  return value === "release_note_webhook" || value === "release_note_manual";
 }
 
 function isReviewJobStatus(value: string): value is ReviewJobStatus {

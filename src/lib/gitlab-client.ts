@@ -52,6 +52,30 @@ export type GitLabCommit = {
   parent_ids?: string[];
 };
 
+export type GitLabTag = {
+  name: string;
+  target?: string | null;
+  message?: string | null;
+  created_at?: string | null;
+  web_url?: string | null;
+  commit?: GitLabCommit | null;
+  release?: {
+    tag_name?: string;
+    description?: string | null;
+  } | null;
+};
+
+export type GitLabRelease = {
+  tag_name: string;
+  name?: string | null;
+  description?: string | null;
+  released_at?: string | null;
+  _links?: {
+    self?: string;
+    edit_url?: string;
+  };
+};
+
 export type GitLabCommitComment = {
   id?: number;
   note: string;
@@ -87,6 +111,7 @@ export type GitLabProjectHook = {
   url: string;
   project_id?: number;
   push_events?: boolean;
+  tag_push_events?: boolean;
   merge_requests_events?: boolean;
   enable_ssl_verification?: boolean;
   name?: string | null;
@@ -101,6 +126,7 @@ export type GitLabBranch = {
 
 type GitLabCompareResponse = {
   commits?: GitLabCommit[];
+  diffs?: GitLabDiff[];
 };
 
 export class GitLabClient {
@@ -237,6 +263,14 @@ export class GitLabClient {
     });
   }
 
+  async listTags(projectId: string): Promise<GitLabTag[]> {
+    return this.paginate<GitLabTag>(`/api/v4/projects/${encodeProjectId(projectId)}/repository/tags`, {
+      per_page: "100",
+      order_by: "updated",
+      sort: "desc"
+    });
+  }
+
   async getCommit(projectId: string, sha: string): Promise<GitLabCommit> {
     return this.request<GitLabCommit>(`/api/v4/projects/${encodeProjectId(projectId)}/repository/commits/${encodeURIComponent(sha)}`, {
       method: "GET"
@@ -244,6 +278,11 @@ export class GitLabClient {
   }
 
   async compareCommits(projectId: string, from: string, to: string): Promise<GitLabCommit[]> {
+    const compare = await this.compareRefs(projectId, from, to);
+    return compare.commits;
+  }
+
+  async compareRefs(projectId: string, from: string, to: string): Promise<{ commits: GitLabCommit[]; diffs: GitLabDiff[] }> {
     const compare = await this.request<GitLabCompareResponse>(
       `/api/v4/projects/${encodeProjectId(projectId)}/repository/compare`,
       {
@@ -255,7 +294,44 @@ export class GitLabClient {
         }
       }
     );
-    return compare.commits ?? [];
+    return {
+      commits: compare.commits ?? [],
+      diffs: compare.diffs ?? []
+    };
+  }
+
+  async getRelease(projectId: string, tagName: string): Promise<GitLabRelease | null> {
+    try {
+      return await this.request<GitLabRelease>(`/api/v4/projects/${encodeProjectId(projectId)}/releases/${encodeURIComponent(tagName)}`, {
+        method: "GET"
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message.includes(" failed with 404:")) return null;
+      throw error;
+    }
+  }
+
+  async createRelease(projectId: string, input: { tagName: string; name: string; description: string }): Promise<GitLabRelease> {
+    return this.request<GitLabRelease>(`/api/v4/projects/${encodeProjectId(projectId)}/releases`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        tag_name: input.tagName,
+        name: input.name,
+        description: input.description
+      })
+    });
+  }
+
+  async updateRelease(projectId: string, tagName: string, input: { name?: string | null; description: string }): Promise<GitLabRelease> {
+    return this.request<GitLabRelease>(`/api/v4/projects/${encodeProjectId(projectId)}/releases/${encodeURIComponent(tagName)}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        ...(input.name ? { name: input.name } : {}),
+        description: input.description
+      })
+    });
   }
 
   async listCommitDiffs(projectId: string, sha: string): Promise<GitLabDiff[]> {
@@ -309,6 +385,7 @@ export class GitLabClient {
       url: input.url,
       token: input.token,
       push_events: true,
+      tag_push_events: true,
       merge_requests_events: true,
       enable_ssl_verification: true,
       ...(input.name ? { name: input.name } : {})

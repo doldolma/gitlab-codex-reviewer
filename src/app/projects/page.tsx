@@ -52,6 +52,12 @@ export default function ProjectsPage() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["projects"] })
   });
 
+  const updateReleaseNotes = useMutation({
+    mutationFn: ({ id, enabled }: { id: number; enabled: boolean }) =>
+      apiSend(`/api/projects/${id}/release-notes`, { method: "PATCH", body: JSON.stringify({ enabled }) }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["projects"] })
+  });
+
   const resetWebhook = useMutation({
     mutationFn: (id: number) => {
       setResettingWebhookProjectId(id);
@@ -127,6 +133,7 @@ export default function ProjectsPage() {
             onUpdate={(id, payload) => updateProject.mutate({ id, payload })}
             onDelete={(id) => deleteProject.mutate(id)}
             onUpdateReviewStrategy={(id, reviewStrategy) => updateReviewStrategy.mutate({ id, reviewStrategy })}
+            onUpdateReleaseNotes={(id, enabled) => updateReleaseNotes.mutate({ id, enabled })}
             isAdmin={auth.data?.currentUser?.role === "admin"}
             onResetWebhook={(id) => resetWebhook.mutate(id)}
             onConfigure={setConfigProject}

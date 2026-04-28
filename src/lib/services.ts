@@ -12,6 +12,7 @@ import { CodexReviewEngine } from "./review-engine";
 import { CodexReviewSettingsService } from "./codex-review-settings";
 import { GitLabWebhookService } from "./gitlab-webhooks";
 import { CodexReviewTriageEngine } from "./review-triage";
+import { CodexReleaseNoteEngine } from "./release-note-engine";
 
 export const config = loadConfig();
 process.env.CODEX_HOME = config.codexHome;
@@ -35,4 +36,19 @@ export const reviewTriageEngine = new CodexReviewTriageEngine({
   codexHome: config.codexHome,
   sandboxMode: config.codexSandboxMode
 });
-export const reviewWorker = new ReviewWorker(config, gitlabOAuth, reviewState, reviewerBot, reviewEngine, reviewTriageEngine, codexReviewSettings);
+export const releaseNoteEngine = new CodexReleaseNoteEngine({
+  codexBin: config.codexBin,
+  codexHome: config.codexHome,
+  sandboxMode: config.codexSandboxMode
+});
+export const reviewWorker = new ReviewWorker(
+  config,
+  gitlabOAuth,
+  reviewState,
+  reviewerBot,
+  reviewEngine,
+  reviewTriageEngine,
+  codexReviewSettings,
+  undefined,
+  releaseNoteEngine
+);

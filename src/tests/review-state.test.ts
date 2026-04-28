@@ -316,6 +316,125 @@ describe("multi-user review state", () => {
     await db.$disconnect();
   });
 
+  it("stores release note settings and generated notes on the shared project", async () => {
+    const db = await testDb();
+    const state = new ReviewStateStore(db);
+    const userId = await insertTestUser(db, { gitlabUserId: 1, username: "alice" });
+    const otherUserId = await insertTestUser(db, { gitlabUserId: 2, username: "bob" });
+    const shared = await state.upsertGitlabProject({
+      gitlabHost: "https://gitlab.example.com",
+      gitlabProjectId: "123",
+      pathWithNamespace: "group/service",
+      nameWithNamespace: "Group / Service",
+      webUrl: "https://gitlab.example.com/group/service"
+    });
+    const project = await state.createProject(userId, {
+      gitlabProjectRefId: shared.id,
+      gitlabProjectId: "123",
+      displayName: "Service",
+      enabled: true,
+      skipLabels: []
+    });
+
+    const updated = await state.updateGitlabProjectReleaseNotesEnabled(userId, project.id, true);
+    expect(updated.releaseNotesEnabled).toBe(true);
+    const { releaseNote, entry } = await state.createQueuedReleaseNote({
+      gitlabProjectRefId: shared.id,
+      gitlabProjectId: shared.gitlabProjectId,
+      projectName: "Group / Service",
+      tagName: "v1.2.0",
+      tagSha: "tag-sha",
+      tagUrl: "https://gitlab.example.com/group/service/-/tags/v1.2.0",
+      trigger: "manual",
+      createdByUserId: userId
+    });
+
+    await state.markReleaseNoteEntryRunning(entry.id);
+    await state.finishReleaseNoteEntry(entry.id, {
+      title: "v1.2.0 릴리즈",
+      notesMarkdown: "# v1.2.0 릴리즈",
+      previousTagName: "v1.1.0",
+      previousTagSha: "previous-sha",
+      commitCount: 3,
+      releaseUrl: "https://gitlab.example.com/group/service/-/releases/v1.2.0",
+      structured: {
+        releaseLanguage: "ko-KR",
+        title: "v1.2.0 릴리즈",
+        overview: "사용자에게 보이는 개선을 정리합니다.",
+        highlights: [],
+        improvements: [],
+        fixes: [],
+        upgradeNotes: [],
+        knownLimitations: [],
+        closingNote: "업데이트하세요."
+      }
+    });
+
+    const notes = await state.listReleaseNotes(userId);
+    expect(notes).toHaveLength(1);
+    expect(notes[0]?.status).toBe("completed");
+    expect(notes[0]?.previousTagName).toBe("v1.1.0");
+    expect(notes[0]?.releaseUrl).toBe("https://gitlab.example.com/group/service/-/releases/v1.2.0");
+    expect(notes[0]?.structured?.title).toBe("v1.2.0 릴리즈");
+    expect(notes[0]?.entries).toHaveLength(1);
+    expect(notes[0]?.entries[0]?.notesMarkdown).toBe("# v1.2.0 릴리즈");
+    expect(await state.listReleaseNotes(otherUserId)).toHaveLength(1);
+    await db.$disconnect();
+  });
+
+  it("keeps previous release note entries when the same tag is generated again", async () => {
+    const db = await testDb();
+    const state = new ReviewStateStore(db);
+    const userId = await insertTestUser(db, { gitlabUserId: 1, username: "alice" });
+    const shared = await state.upsertGitlabProject({
+      gitlabHost: "https://gitlab.example.com",
+      gitlabProjectId: "123",
+      pathWithNamespace: "group/service",
+      nameWithNamespace: "Group / Service"
+    });
+
+    const first = await state.createQueuedReleaseNote({
+      gitlabProjectRefId: shared.id,
+      gitlabProjectId: shared.gitlabProjectId,
+      projectName: "Group / Service",
+      tagName: "v1.2.0",
+      tagSha: "tag-sha",
+      trigger: "manual",
+      createdByUserId: userId
+    });
+    await state.finishReleaseNoteEntry(first.entry.id, {
+      title: "첫 릴리즈노트",
+      notesMarkdown: "first markdown",
+      structured: releaseNoteFixture("첫 릴리즈노트"),
+      previousTagName: "v1.1.0",
+      previousTagSha: "previous",
+      commitCount: 2
+    });
+    const second = await state.createQueuedReleaseNote({
+      gitlabProjectRefId: shared.id,
+      gitlabProjectId: shared.gitlabProjectId,
+      projectName: "Group / Service",
+      tagName: "v1.2.0",
+      tagSha: "tag-sha",
+      trigger: "manual",
+      createdByUserId: userId
+    });
+    await state.finishReleaseNoteEntry(second.entry.id, {
+      title: "추가 릴리즈노트",
+      notesMarkdown: "second markdown",
+      structured: releaseNoteFixture("추가 릴리즈노트"),
+      previousTagName: "v1.1.0",
+      previousTagSha: "previous",
+      commitCount: 2
+    });
+
+    const notes = await state.listReleaseNotes(userId);
+    expect(notes).toHaveLength(1);
+    expect(notes[0]?.notesMarkdown).toBe("second markdown");
+    expect(notes[0]?.entries.map((entry) => entry.notesMarkdown)).toEqual(["second markdown", "first markdown"]);
+    await db.$disconnect();
+  });
+
   it("stores shared project review config for subscribed users only", async () => {
     const db = await testDb();
     const state = new ReviewStateStore(db);
@@ -935,3 +1054,17 @@ describe("multi-user review state", () => {
     await db.$disconnect();
   });
 });
+
+function releaseNoteFixture(title: string) {
+  return {
+    releaseLanguage: "ko-KR" as const,
+    title,
+    overview: "사용자에게 보이는 개선을 정리합니다.",
+    highlights: [],
+    improvements: [],
+    fixes: [],
+    upgradeNotes: [],
+    knownLimitations: [],
+    closingNote: "업데이트하세요."
+  };
+}

@@ -112,6 +112,7 @@ model GitlabProject {
   reviewStrategyUpdatedAt String? @map("review_strategy_updated_at")
   reviewProfile          String  @default("assertive") @map("review_profile")
   pathFiltersJson        String  @default("[]") @map("path_filters_json")
+  releaseNotesEnabled    Boolean @default(false) @map("release_notes_enabled")
   createdAt              String  @map("created_at")
   updatedAt              String  @map("updated_at")
 
@@ -121,6 +122,7 @@ model GitlabProject {
   branchWatchStates BranchWatchState[]
   commitReviewRuns  CommitReviewRun[]
   reviewInstructions ProjectReviewInstruction[]
+  releaseNotes       ReleaseNote[]
 
   @@unique([gitlabHost, gitlabProjectId])
   @@index([gitlabHost], map: "idx_gitlab_projects_host")
@@ -140,6 +142,61 @@ model ProjectReviewInstruction {
 
   @@index([gitlabProjectRefId], map: "idx_project_review_instructions_project")
   @@map("project_review_instructions")
+}
+
+model ReleaseNote {
+  id                 Int     @id @default(autoincrement())
+  gitlabProjectRefId Int     @map("gitlab_project_ref_id")
+  gitlabProjectId    String  @map("gitlab_project_id")
+  projectName        String  @map("project_name")
+  tagName            String  @map("tag_name")
+  tagSha             String  @map("tag_sha")
+  tagUrl             String? @map("tag_url")
+  releaseUrl         String? @map("release_url")
+  previousTagName    String? @map("previous_tag_name")
+  previousTagSha     String? @map("previous_tag_sha")
+  commitCount        Int     @default(0) @map("commit_count")
+  status             String
+  title              String?
+  notesMarkdown      String? @map("notes_markdown")
+  structuredJson     String? @map("structured_json")
+  errorMessage       String? @map("error_message")
+  generatedAt        String? @map("generated_at")
+  createdAt          String  @map("created_at")
+  updatedAt          String  @map("updated_at")
+
+  gitlabProject GitlabProject @relation(fields: [gitlabProjectRefId], references: [id], onDelete: Cascade)
+  entries       ReleaseNoteEntry[]
+
+  @@unique([gitlabProjectRefId, tagName], map: "uniq_release_notes_project_tag")
+  @@index([status, createdAt], map: "idx_release_notes_status_created")
+  @@index([gitlabProjectRefId], map: "idx_release_notes_project")
+  @@map("release_notes")
+}
+
+model ReleaseNoteEntry {
+  id                 Int     @id @default(autoincrement())
+  releaseNoteId      Int     @map("release_note_id")
+  createdByUserId    Int?    @map("created_by_user_id")
+  trigger            String
+  status             String
+  title              String?
+  notesMarkdown      String? @map("notes_markdown")
+  structuredJson     String? @map("structured_json")
+  previousTagName    String? @map("previous_tag_name")
+  previousTagSha     String? @map("previous_tag_sha")
+  commitCount        Int     @default(0) @map("commit_count")
+  errorMessage       String? @map("error_message")
+  generatedAt        String? @map("generated_at")
+  createdAt          String  @map("created_at")
+  updatedAt          String  @map("updated_at")
+
+  releaseNote ReleaseNote @relation(fields: [releaseNoteId], references: [id], onDelete: Cascade)
+
+  @@index([releaseNoteId, createdAt], map: "idx_release_note_entries_note_created")
+  @@index([status, createdAt], map: "idx_release_note_entries_status_created")
+  @@index([createdByUserId], map: "idx_release_note_entries_created_by")
+  @@map("release_note_entries")
 }
 
 model Project {

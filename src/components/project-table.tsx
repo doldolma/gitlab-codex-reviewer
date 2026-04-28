@@ -16,6 +16,7 @@ export function ProjectTable({
   onUpdate,
   onDelete,
   onUpdateReviewStrategy,
+  onUpdateReleaseNotes,
   onResetWebhook,
   onConfigure,
   isAdmin = false,
@@ -25,6 +26,7 @@ export function ProjectTable({
   onUpdate: (id: number, payload: ProjectUpdatePayload) => void;
   onDelete: (id: number) => void;
   onUpdateReviewStrategy?: (id: number, reviewStrategy: ReviewStrategy) => void;
+  onUpdateReleaseNotes?: (id: number, enabled: boolean) => void;
   onResetWebhook?: (id: number) => void;
   onConfigure?: (project: Project) => void;
   isAdmin?: boolean;
@@ -55,6 +57,7 @@ export function ProjectTable({
                 </span>
               </span>
             </th>
+            <th>릴리즈노트</th>
             <th>Webhook</th>
             <th>상태</th>
             <th />
@@ -68,6 +71,7 @@ export function ProjectTable({
               onUpdate={onUpdate}
               onDelete={onDelete}
               onUpdateReviewStrategy={onUpdateReviewStrategy}
+              onUpdateReleaseNotes={onUpdateReleaseNotes}
               onResetWebhook={onResetWebhook}
               onConfigure={onConfigure}
               isAdmin={isAdmin}
@@ -76,7 +80,7 @@ export function ProjectTable({
           ))}
           {!projects.length && (
             <tr>
-              <td colSpan={7} className="empty">
+              <td colSpan={8} className="empty">
                 설정된 프로젝트가 없습니다
               </td>
             </tr>
@@ -92,6 +96,7 @@ function ProjectRow({
   onUpdate,
   onDelete,
   onUpdateReviewStrategy,
+  onUpdateReleaseNotes,
   onResetWebhook,
   onConfigure,
   isAdmin,
@@ -101,6 +106,7 @@ function ProjectRow({
   onUpdate: (id: number, payload: ProjectUpdatePayload) => void;
   onDelete: (id: number) => void;
   onUpdateReviewStrategy?: (id: number, reviewStrategy: ReviewStrategy) => void;
+  onUpdateReleaseNotes?: (id: number, enabled: boolean) => void;
   onResetWebhook?: (id: number) => void;
   onConfigure?: (project: Project) => void;
   isAdmin: boolean;
@@ -109,11 +115,13 @@ function ProjectRow({
   const [mrTargetBranches, setMrTargetBranches] = useState<string[]>(project.mrTargetBranches);
   const [commitBranches, setCommitBranches] = useState<string[]>(project.commitBranches);
   const [enabled, setEnabled] = useState(project.enabled);
+  const [releaseNotesEnabled, setReleaseNotesEnabled] = useState(project.releaseNotesEnabled);
 
   useEffect(() => {
     setMrTargetBranches(project.mrTargetBranches);
     setCommitBranches(project.commitBranches);
     setEnabled(project.enabled);
+    setReleaseNotesEnabled(project.releaseNotesEnabled);
   }, [project]);
 
   function updateProject(next: Partial<ProjectUpdatePayload>) {
@@ -139,6 +147,12 @@ function ProjectRow({
     const nextEnabled = !enabled;
     setEnabled(nextEnabled);
     updateProject({ enabled: nextEnabled });
+  }
+
+  function toggleReleaseNotes() {
+    const nextEnabled = !releaseNotesEnabled;
+    setReleaseNotesEnabled(nextEnabled);
+    onUpdateReleaseNotes?.(project.id, nextEnabled);
   }
 
   return (
@@ -188,6 +202,13 @@ function ProjectRow({
           <option value="balanced">균형</option>
           <option value="thorough">정밀</option>
         </select>
+      </td>
+      <td>
+        <label className="switch-control" title="v로 시작하는 태그가 생성되면 사용자용 릴리즈노트를 작성합니다">
+          <input type="checkbox" checked={releaseNotesEnabled} onChange={toggleReleaseNotes} />
+          <span className="switch-track" aria-hidden="true" />
+          <span>{releaseNotesEnabled ? "켜짐" : "꺼짐"}</span>
+        </label>
       </td>
       <td>
         <WebhookStatus project={project} />

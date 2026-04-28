@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import type { ReactNode } from "react";
 import { useEffect } from "react";
-import { GitCommit, GitMerge, LayoutDashboard, LogOut, Settings, ShieldCheck } from "lucide-react";
+import { GitCommit, GitMerge, LayoutDashboard, LogOut, Newspaper, Settings, ShieldCheck } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiGet, apiSend, type AuthStatus } from "../lib/api-client";
 
@@ -59,6 +59,12 @@ export function AppShell({ children }: { children: ReactNode }) {
             icon={<GitCommit size={18} />}
             label="Commit Reviews"
             active={pathname === "/commit-reviews"}
+          />
+          <NavItem
+            href="/release-notes"
+            icon={<Newspaper size={18} />}
+            label="Release Notes"
+            active={pathname === "/release-notes"}
           />
           <NavItem href="/settings" icon={<Settings size={18} />} label="Settings" active={pathname === "/settings"} />
         </nav>

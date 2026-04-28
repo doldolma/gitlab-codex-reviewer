@@ -3,11 +3,14 @@ import type { AppConfig } from "../lib/config";
 import { defaultModelSettings, runtimeSettings, type CodexReviewModelSettings, type CodexReviewRuntimeSettings } from "../lib/codex-review-settings";
 import { CodexReviewEngine, type Reviewer } from "../lib/review-engine";
 import { formatCommitDiffForReview, formatDiffForReview, type FormattedDiff } from "../lib/diff-formatter";
-import { GitLabClient, type GitLabCommit, type GitLabDiff, type GitLabMergeRequest } from "../lib/gitlab-client";
+import { GitLabClient, type GitLabCommit, type GitLabDiff, type GitLabMergeRequest, type GitLabTag } from "../lib/gitlab-client";
 import { GitWorkspaceManager } from "../lib/git-workspace";
 import { logReview, type ReviewLogSource } from "../lib/logger";
 import { publishCommitReviewNote, publishReviewNote } from "../lib/note-publisher";
 import { REVIEW_PROMPT_VERSION, type PromptToolFinding, type ReviewIssue, type ReviewPromptInput } from "../lib/prompts";
+import { RELEASE_NOTE_PROMPT_VERSION } from "../lib/release-note-prompts";
+import { CodexReleaseNoteEngine, type ReleaseNoteWriter } from "../lib/release-note-engine";
+import { composeGitLabReleaseDescription } from "../lib/release-description";
 import { publishMergeRequestInlineComments } from "../lib/inline-comment-publisher";
 import type { ReviewerBotService } from "../lib/reviewer-bot";
 import { defaultPathFilters, filterChangedFiles, matchReviewInstructions, type ProjectReviewConfig } from "../lib/review-config";
@@ -67,7 +70,8 @@ export class ReviewWorker {
         return defaultModelSettings();
       }
     },
-    private readonly toolRunner: ReadonlyToolRunner = new ReadonlyToolRunner()
+    private readonly toolRunner: ReadonlyToolRunner = new ReadonlyToolRunner(),
+    private readonly releaseNoteWriter: ReleaseNoteWriter = new CodexReleaseNoteEngine()
   ) {
     this.workspace = new GitWorkspaceManager(config);
   }
@@ -331,6 +335,16 @@ export class ReviewWorker {
   }
 
   private async failRunForJob(job: ReviewJobView, error: unknown): Promise<void> {
+    if (isReleaseNoteJobKind(job.kind)) {
+      const releaseNoteEntryId = numberFromPayload(job.payload, "releaseNoteEntryId");
+      if (releaseNoteEntryId) {
+        await this.state.failReleaseNoteEntry(releaseNoteEntryId, error);
+        return;
+      }
+      const releaseNoteId = numberFromPayload(job.payload, "releaseNoteId");
+      if (releaseNoteId) await this.state.failReleaseNote(releaseNoteId, error);
+      return;
+    }
     if (!job.runType || !job.runId) return;
     try {
       if (job.runType === "commit") {
@@ -374,12 +388,105 @@ export class ReviewWorker {
         return this.executeWebhookCommitJob(job, signal, checkCancellation);
       case "mr_webhook":
         return this.executeWebhookMrJob(job, signal, checkCancellation);
+      case "release_note_webhook":
+      case "release_note_manual":
+        return this.executeReleaseNoteJob(job, signal, checkCancellation);
       case "scan_user":
         await ensureNotCanceled(signal, checkCancellation);
         await this.scanOnce();
         return "processed";
       default:
         throw new Error(`Unknown review job kind: ${job.kind}`);
+    }
+  }
+
+  private async executeReleaseNoteJob(job: ReviewJobView, signal?: AbortSignal, checkCancellation?: CancellationCheck): Promise<"processed" | "deferred"> {
+    await ensureNotCanceled(signal, checkCancellation);
+    const releaseNoteId = numberFromPayload(job.payload, "releaseNoteId");
+    const releaseNoteEntryId = numberFromPayload(job.payload, "releaseNoteEntryId");
+    if (!releaseNoteId || !releaseNoteEntryId) throw new Error("Release note job payload is invalid");
+
+    const releaseNote = await this.state.getReleaseNote(releaseNoteId);
+    if (!releaseNote) throw new Error("Release note was not found");
+    const gitlabProjectRefId = numberFromPayload(job.payload, "gitlabProjectRefId") ?? releaseNote.gitlabProjectRefId;
+    const sharedProject = await this.state.getGitlabProject(gitlabProjectRefId);
+    const lockKey = `release-note:${sharedProject.id}:${releaseNote.tagName}`;
+    if (!(await this.state.acquireLock(lockKey))) {
+      await this.requeueBusyJob(job, "Release note generation is already running.", checkCancellation);
+      return "deferred";
+    }
+
+    try {
+      await this.state.markReleaseNoteEntryRunning(releaseNoteEntryId);
+      const botConnection = await this.reviewerBot.getConnection();
+      if (!botConnection) throw new Error("Reviewer bot token is not connected");
+      const client = new GitLabClient(botConnection);
+      const tags = await client.listTags(sharedProject.gitlabProjectId);
+      const currentTag = currentReleaseTag(tags, releaseNote.tagName, releaseNote.tagSha);
+      const previousTag = previousReleaseTag(tags, currentTag);
+      const compare = previousTag
+        ? await client.compareRefs(sharedProject.gitlabProjectId, previousTag.name, currentTag.name)
+        : {
+            commits: [currentTag.commit ?? await client.getCommit(sharedProject.gitlabProjectId, releaseNote.tagSha)],
+            diffs: await client.listCommitDiffs(sharedProject.gitlabProjectId, releaseNote.tagSha)
+          };
+      const commits = orderCommitsOldestFirst(compare.commits.filter((commit) => Boolean(commit.id)));
+      const formatted = formatReleaseDiff(
+        projectDisplayName(sharedProject),
+        currentTag.name,
+        previousTag?.name ?? null,
+        commits,
+        compare.diffs,
+        this.config.maxDiffBytes
+      );
+      const modelSettings = await this.reviewSettings.getEffectiveReviewSettings();
+      const settings = runtimeSettings(modelSettings.model, "xhigh");
+      console.log(
+        `[worker] [release-note] Generating release note: project=${sharedProject.gitlabProjectId}, tag=${currentTag.name}, previous=${previousTag?.name ?? "none"}.`
+      );
+      const result = await this.releaseNoteWriter.write(
+        {
+          projectName: projectDisplayName(sharedProject),
+          tagName: currentTag.name,
+          previousTagName: previousTag?.name ?? null,
+          commitCount: commits.length,
+          commits,
+          diffText: formatted.text,
+          diffTruncated: formatted.truncated,
+          omittedFiles: formatted.omittedFiles
+        },
+        settings,
+        { signal }
+      );
+      await ensureNotCanceled(signal, checkCancellation);
+      const publishedRelease = await publishGitLabReleaseNote(
+        client,
+        sharedProject,
+        currentTag.name,
+        result.structured.title,
+        result.markdown,
+        job.kind === "release_note_manual" ? "manual" : "webhook"
+      );
+      await ensureNotCanceled(signal, checkCancellation);
+      await this.state.finishReleaseNoteEntry(releaseNoteEntryId, {
+        title: result.structured.title,
+        notesMarkdown: result.markdown,
+        structured: result.structured,
+        previousTagName: previousTag?.name ?? null,
+        previousTagSha: tagSha(previousTag),
+        commitCount: commits.length,
+        releaseUrl: publishedRelease.url
+      });
+      console.log(
+        `[worker] [release-note] Release note completed: project=${sharedProject.gitlabProjectId}, tag=${currentTag.name}, release=${publishedRelease.url ?? "unknown"}, prompt=${RELEASE_NOTE_PROMPT_VERSION}.`
+      );
+      return "processed";
+    } catch (error) {
+      if (isCancellationError(error, signal)) throw error;
+      await this.state.failReleaseNoteEntry(releaseNoteEntryId, error);
+      throw error;
+    } finally {
+      await this.state.releaseLock(lockKey);
     }
   }
 
@@ -920,6 +1027,7 @@ export class ReviewWorker {
         reviewStrategyUpdatedAt: null,
         reviewProfile: "assertive",
         pathFilters: defaultPathFilters(),
+        releaseNotesEnabled: false,
         webhookStatus: "missing",
         webhookUrl: null,
         webhookLastVerifiedAt: null,
@@ -1608,6 +1716,127 @@ function projectDisplayName(project: GitlabProjectRow): string {
   return project.nameWithNamespace ?? project.pathWithNamespace ?? project.gitlabProjectId;
 }
 
+function currentReleaseTag(tags: GitLabTag[], tagName: string, tagSha: string): GitLabTag {
+  return tags.find((tag) => tag.name === tagName) ?? {
+    name: tagName,
+    target: tagSha,
+    commit: { id: tagSha }
+  };
+}
+
+function previousReleaseTag(tags: GitLabTag[], current: GitLabTag): GitLabTag | null {
+  const currentTime = tagTimestamp(current);
+  const byTime = tags
+    .filter((tag) => tag.name !== current.name && isReleaseTagName(tag.name))
+    .map((tag) => ({ tag, timestamp: tagTimestamp(tag) }))
+    .filter((entry) => currentTime > 0 && entry.timestamp > 0 && entry.timestamp < currentTime)
+    .sort((left, right) => right.timestamp - left.timestamp);
+  if (byTime[0]) return byTime[0].tag;
+
+  const currentIndex = tags.findIndex((tag) => tag.name === current.name);
+  if (currentIndex >= 0) {
+    return tags.slice(currentIndex + 1).find((tag) => isReleaseTagName(tag.name)) ?? null;
+  }
+  return tags.find((tag) => tag.name !== current.name && isReleaseTagName(tag.name)) ?? null;
+}
+
+function tagTimestamp(tag: GitLabTag): number {
+  const value = tag.created_at ?? tag.commit?.committed_date ?? tag.commit?.created_at;
+  return value ? Date.parse(value) || 0 : 0;
+}
+
+function tagSha(tag: GitLabTag | null | undefined): string | null {
+  return tag?.commit?.id ?? tag?.target ?? null;
+}
+
+function isReleaseTagName(tagName: string): boolean {
+  return tagName.startsWith("v");
+}
+
+function formatReleaseDiff(
+  projectName: string,
+  tagName: string,
+  previousTagName: string | null,
+  commits: GitLabCommit[],
+  diffs: GitLabDiff[],
+  maxBytes: number
+): FormattedDiff {
+  const header = [
+    `Project: ${projectName}`,
+    `Release tag: ${tagName}`,
+    previousTagName ? `Previous release tag: ${previousTagName}` : "Previous release tag: none",
+    `Commit count: ${commits.length}`,
+    "",
+    "Unified diff follows. Write user-facing release notes and avoid internal implementation details.",
+    ""
+  ].join("\n");
+
+  let text = header;
+  let truncated = false;
+  let omittedFiles = 0;
+
+  for (const file of diffs) {
+    const flags = [
+      file.new_file ? "new" : null,
+      file.renamed_file ? "renamed" : null,
+      file.deleted_file ? "deleted" : null,
+      file.generated_file ? "generated" : null,
+      file.collapsed ? "collapsed" : null,
+      file.too_large ? "too_large" : null
+    ].filter(Boolean);
+    const chunk = [
+      `diff --git a/${file.old_path} b/${file.new_path}`,
+      flags.length ? `# GitLab flags: ${flags.join(", ")}` : null,
+      file.diff,
+      ""
+    ].filter((line): line is string => line !== null).join("\n");
+
+    if (Buffer.byteLength(text + chunk, "utf8") > maxBytes) {
+      truncated = true;
+      omittedFiles += 1;
+      continue;
+    }
+    text += chunk;
+  }
+
+  if (!diffs.length) text += "\n# No diff was returned by GitLab for this release range.\n";
+  if (truncated) text += `\n# Diff truncated by GitLab Codex Reviewer. Omitted files: ${omittedFiles}.\n`;
+  return { text, truncated, omittedFiles };
+}
+
+async function publishGitLabReleaseNote(
+  client: GitLabClient,
+  project: GitlabProjectRow,
+  tagName: string,
+  title: string,
+  markdown: string,
+  trigger: "manual" | "webhook"
+): Promise<{ url: string | null }> {
+  const existing = await client.getRelease(project.gitlabProjectId, tagName);
+  const description = existing?.description
+    ? composeGitLabReleaseDescription(existing.description, markdown, trigger, tagName)
+    : composeGitLabReleaseDescription(null, markdown, trigger, tagName);
+  const release = existing
+    ? await client.updateRelease(project.gitlabProjectId, tagName, {
+        name: existing.name ?? title,
+        description
+      })
+    : await client.createRelease(project.gitlabProjectId, {
+        tagName,
+        name: title,
+        description
+      });
+
+  return {
+    url: release._links?.self ?? releaseWebUrl(project.webUrl, release.tag_name || tagName)
+  };
+}
+
+function releaseWebUrl(projectWebUrl: string | null, tagName: string): string | null {
+  if (!projectWebUrl) return null;
+  return `${projectWebUrl.replace(/\/$/, "")}/-/releases/${encodeURIComponent(tagName)}`;
+}
+
 function codexStartMetadata(
   settings: CodexReviewRuntimeSettings,
   resolution: ReviewStrategyResolution,
@@ -1740,4 +1969,8 @@ function isCancellationError(error: unknown, signal?: AbortSignal): boolean {
   if (error instanceof ReviewCanceledError) return true;
   if (error instanceof Error && (error.name === "AbortError" || error.message.toLowerCase().includes("abort"))) return true;
   return false;
+}
+
+function isReleaseNoteJobKind(value: string): boolean {
+  return value === "release_note_webhook" || value === "release_note_manual";
 }
