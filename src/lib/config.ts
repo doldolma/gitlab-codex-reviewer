@@ -8,8 +8,11 @@ const envFilePath = findEnvFile();
 loadDotenv({ path: envFilePath });
 
 const DEFAULT_DATABASE_URL = "file:../.data/gitlab-codex-reviewer.sqlite";
+const DEFAULT_WORKSPACE_ROOT = ".data/workspaces";
 const DEFAULT_REVIEW_CONCURRENCY = 3;
 const DEFAULT_POLL_INTERVAL_SECONDS = 300;
+const DEFAULT_MAX_DIFF_BYTES = 200_000;
+const DEFAULT_MAX_CONTEXT_BYTES = 120_000;
 export type CodexSandboxMode = "read-only" | "danger-full-access";
 
 const envSchema = z.object({
@@ -17,10 +20,7 @@ const envSchema = z.object({
   PUBLIC_BASE_URL: z.string().url().default("http://127.0.0.1:3000"),
   GITLAB_BASE_URL: z.string().url().default("https://gitlab.com"),
   GITLAB_OAUTH_CLIENT_ID: z.string().optional(),
-  GITLAB_OAUTH_CLIENT_SECRET: z.string().optional(),
-  MAX_DIFF_BYTES: z.coerce.number().int().positive().default(200_000),
-  MAX_CONTEXT_BYTES: z.coerce.number().int().positive().default(120_000),
-  WORKSPACE_ROOT: z.string().default(".data/workspaces")
+  GITLAB_OAUTH_CLIENT_SECRET: z.string().optional()
 });
 
 export type AppConfig = ReturnType<typeof loadConfig>;
@@ -32,7 +32,7 @@ export function loadConfig() {
   process.env.DATABASE_URL = databaseUrl;
 
   const codexHome = resolveCodexHome(appRoot);
-  const workspaceRoot = resolve(appRoot, env.WORKSPACE_ROOT);
+  const workspaceRoot = resolve(appRoot, DEFAULT_WORKSPACE_ROOT);
   const dataDir = resolve(appRoot, ".data");
   const appSecretsPath = resolve(dataDir, "app-secrets.json");
 
@@ -61,8 +61,8 @@ export function loadConfig() {
     workspaceRoot,
     pollIntervalSeconds: DEFAULT_POLL_INTERVAL_SECONDS,
     reviewConcurrency: DEFAULT_REVIEW_CONCURRENCY,
-    maxDiffBytes: env.MAX_DIFF_BYTES,
-    maxContextBytes: env.MAX_CONTEXT_BYTES,
+    maxDiffBytes: DEFAULT_MAX_DIFF_BYTES,
+    maxContextBytes: DEFAULT_MAX_CONTEXT_BYTES,
     isProduction: env.NODE_ENV === "production",
     secureCookies: new URL(publicBaseUrl).protocol === "https:"
   };

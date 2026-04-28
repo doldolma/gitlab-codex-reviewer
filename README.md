@@ -38,30 +38,37 @@ http://127.0.0.1:3000
 npm run build
 ```
 
-운영에서는 web과 worker를 별도 프로세스로 실행합니다.
+Node로 직접 운영할 때는 web과 worker를 별도 프로세스로 실행합니다.
 
 ```bash
 npm run start:web
 npm run start:worker
 ```
 
-Docker Compose로 배포할 때는 web과 worker 두 서비스만 장기 실행합니다. web이 시작 전에 Prisma migration을 적용하고, worker는 web healthcheck 이후 시작합니다.
+Docker Compose로 배포할 때는 GHCR에 올라간 Docker image를 사용해 단일 `app` 컨테이너만 장기 실행합니다. 컨테이너 시작 시 Prisma migration을 적용한 뒤 Next.js standalone server와 worker process를 함께 띄웁니다.
 
 ```bash
 cp .env.example .env.prod
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 ```
 
-Docker 배포에서는 `.env.prod`의 `PUBLIC_BASE_URL`을 실제 접속 URL로 바꿔주세요.
+Docker 배포에서는 `.env.prod`의 `PUBLIC_BASE_URL`을 실제 접속 URL로 바꿔주세요. GHCR package가 private이면 배포 서버에서 먼저 `docker login ghcr.io`를 실행해야 합니다.
 
 SQLite DB는 별도 환경 변수 없이 `.data` volume의 기본 경로를 자동 사용합니다.
 
 Docker image에는 Codex가 workspace를 읽고 ToolRunner가 보조 분석을 수행할 수 있도록 `git`, `rg`, `gitleaks`, `golangci-lint`, Go toolchain, 앱 번들 `eslint`가 포함됩니다.
 
+특정 릴리스 이미지를 고정해서 배포하려면 `IMAGE_TAG`를 지정합니다.
+
+```bash
+IMAGE_TAG=1.2.3 docker compose up -d
+```
+
 외부 포트를 바꾸려면 `HOST_PORT`를 지정합니다.
 
 ```bash
-HOST_PORT=3300 docker compose up -d --build
+HOST_PORT=3300 docker compose up -d
 ```
 
 ## 문서

@@ -12,6 +12,9 @@ describe("config codex defaults", () => {
   const originalAppRoot = process.env.APP_ROOT;
   const originalNodeEnv = process.env.NODE_ENV;
   const originalPublicBaseUrl = process.env.PUBLIC_BASE_URL;
+  const originalWorkspaceRoot = process.env.WORKSPACE_ROOT;
+  const originalMaxDiffBytes = process.env.MAX_DIFF_BYTES;
+  const originalMaxContextBytes = process.env.MAX_CONTEXT_BYTES;
 
   afterEach(() => {
     restoreEnv("CODEX_HOME", originalCodexHome);
@@ -21,6 +24,9 @@ describe("config codex defaults", () => {
     restoreEnv("APP_ROOT", originalAppRoot);
     restoreEnv("NODE_ENV", originalNodeEnv);
     restoreEnv("PUBLIC_BASE_URL", originalPublicBaseUrl);
+    restoreEnv("WORKSPACE_ROOT", originalWorkspaceRoot);
+    restoreEnv("MAX_DIFF_BYTES", originalMaxDiffBytes);
+    restoreEnv("MAX_CONTEXT_BYTES", originalMaxContextBytes);
   });
 
   it("uses the app root .data/codex directory without CODEX_HOME env support", () => {
@@ -62,6 +68,22 @@ describe("config codex defaults", () => {
     expect(loadConfig().pollIntervalSeconds).toBe(300);
   });
 
+  it("uses the internal workspace root instead of WORKSPACE_ROOT env", () => {
+    process.env.WORKSPACE_ROOT = "/tmp/ignored-workspace-root";
+
+    expect(loadConfig().workspaceRoot).toBe(resolve(process.cwd(), ".data", "workspaces"));
+  });
+
+  it("uses internal review size limits instead of env", () => {
+    process.env.MAX_DIFF_BYTES = "123";
+    process.env.MAX_CONTEXT_BYTES = "456";
+
+    const config = loadConfig();
+
+    expect(config.maxDiffBytes).toBe(200_000);
+    expect(config.maxContextBytes).toBe(120_000);
+  });
+
   it("uses APP_ROOT for runtime data paths in standalone deployments", () => {
     const root = mkdtempSync(join(tmpdir(), "gitlab-codex-app-root-"));
     process.env.APP_ROOT = root;
@@ -92,7 +114,17 @@ function setEnv(key: "NODE_ENV" | "PUBLIC_BASE_URL", value: string): void {
 }
 
 function restoreEnv(
-  key: "CODEX_HOME" | "CODEX_BIN" | "DATABASE_URL" | "POLL_INTERVAL_SECONDS" | "APP_ROOT" | "NODE_ENV" | "PUBLIC_BASE_URL",
+  key:
+    | "CODEX_HOME"
+    | "CODEX_BIN"
+    | "DATABASE_URL"
+    | "POLL_INTERVAL_SECONDS"
+    | "APP_ROOT"
+    | "NODE_ENV"
+    | "PUBLIC_BASE_URL"
+    | "WORKSPACE_ROOT"
+    | "MAX_DIFF_BYTES"
+    | "MAX_CONTEXT_BYTES",
   value: string | undefined
 ): void {
   const env = process.env as Record<string, string | undefined>;

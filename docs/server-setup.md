@@ -36,7 +36,7 @@ npm run dev:worker
 
 ## 운영 실행
 
-운영에서는 web과 worker를 별도 프로세스로 띄웁니다. Next process 안에서 background polling을 돌리지 않습니다.
+Node로 직접 운영할 때는 web과 worker를 별도 프로세스로 띄웁니다. Next process 안에서 background polling을 돌리지 않습니다.
 
 ```bash
 npm run build
@@ -44,28 +44,49 @@ npm run start:web
 npm run start:worker
 ```
 
-`npm run start:web`은 시작 전에 Prisma migration을 적용합니다. `npm run start`는 `start:web`만 실행합니다. 운영 supervisor(systemd, pm2, docker-compose 등)에서 `start:web`과 `start:worker`를 각각 관리하세요.
+`npm run start:web`은 시작 전에 Prisma migration을 적용합니다. `npm run start`는 `start:web`만 실행합니다. Docker를 쓰지 않는 운영 supervisor(systemd, pm2 등)에서는 `start:web`과 `start:worker`를 각각 관리하세요.
 
 ## Docker Compose 실행
 
-Docker Compose 배포에서는 장기 실행 서비스가 `web`, `worker` 두 개만 뜹니다.
+Docker Compose 배포에서는 GHCR에 publish된 image로 장기 실행 서비스 `app` 하나만 띄웁니다.
 
-- `web`: 시작 전에 `npm run db:deploy`를 실행하고 Next.js standalone server를 띄웁니다.
-- `worker`: `web` healthcheck가 통과한 뒤 시작해 webhook review job과 fallback polling을 처리합니다.
+`app` 컨테이너는 시작 전에 `npm run db:deploy`를 실행하고, Next.js standalone server와 worker process를 함께 띄웁니다. 둘 중 하나가 종료되면 컨테이너도 종료되어 compose restart policy가 복구를 맡습니다.
 
 ```bash
 cp .env.example .env.prod
-docker compose up -d --build
+docker compose pull
+docker compose up -d
+```
+
+기본 image는 `ghcr.io/doldolma/gitlab-bot:latest`입니다. GHCR package가 private이면 배포 서버에서 먼저 로그인합니다.
+
+```bash
+docker login ghcr.io
+```
+
+운영에서 특정 release image를 고정하려면 `IMAGE_TAG`를 지정합니다.
+
+```bash
+IMAGE_TAG=1.2.3 docker compose up -d
+```
+
+새 latest image로 갱신하려면 pull 후 재시작합니다.
+
+```bash
+docker compose pull
+docker compose up -d
 ```
 
 외부 port를 바꾸려면 `HOST_PORT`를 지정합니다. 컨테이너 내부 port는 항상 `3000`입니다.
 
 ```bash
-HOST_PORT=3300 docker compose up -d --build
+HOST_PORT=3300 docker compose up -d
 ```
 
 Docker image는 내부에서 `0.0.0.0:3000`으로 listen합니다. `.env.prod`에는 `PUBLIC_BASE_URL`, GitLab OAuth 값처럼 배포마다 달라지는 값만 둡니다. `.env.example`을 복사한 뒤 `PUBLIC_BASE_URL`을 실제 접속 URL로 바꿔주세요.
 SQLite DB는 환경 변수로 설정하지 않으며, `.data/gitlab-codex-reviewer.sqlite` 기본 경로를 자동 사용합니다.
+
+Docker image는 GitHub에서 `v*.*.*` tag를 push할 때 GitHub Actions가 GHCR에 publish합니다. 예를 들어 `v1.2.3` tag는 `ghcr.io/doldolma/gitlab-bot:1.2.3`, `1.2`, `latest`, `sha-<shortsha>` 태그를 생성합니다.
 
 Docker image에는 리뷰 도구도 함께 들어갑니다.
 
@@ -86,11 +107,8 @@ ToolRunner는 read-only로만 동작합니다. `golangci-lint`는 대상 reposit
 | `GITLAB_BASE_URL` | `https://gitlab.com` | 필수 | GitLab.com 또는 self-managed GitLab base URL입니다. 예: `https://gitlab.example.com` |
 | `GITLAB_OAUTH_CLIENT_ID` | 없음 | 필수 | GitLab OAuth application의 Application ID입니다. |
 | `GITLAB_OAUTH_CLIENT_SECRET` | 없음 | 권장 | OAuth application secret입니다. self-managed GitLab에서 confidential client이면 필요할 수 있습니다. |
-| `WORKSPACE_ROOT` | `.data/workspaces` | 선택 | worker가 GitLab repository를 project별로 clone/fetch/checkout하는 read-only workspace root입니다. |
-| `MAX_DIFF_BYTES` | `200000` | 필수 | Codex에 전달할 diff 입력의 최대 byte 수입니다. |
-| `MAX_CONTEXT_BYTES` | `120000` | 필수 | checkout된 workspace에서 diff 관련 파일 내용을 Codex에 추가로 전달할 최대 byte 수입니다. |
 
-`NODE_ENV`, `HOST`, `PORT`, DB URL, 암호화 key, session secret, 리뷰 동시성, worker polling 주기는 새 설치에서 입력하지 않습니다. 로컬 web은 기본 `127.0.0.1:3000`, Docker web은 이미지 기본 `0.0.0.0:3000`을 사용합니다. DB 경로와 secret은 앱 내부 기본값/자동 생성값을 사용하고, 리뷰 job 동시성은 내부 기본값 3을 사용합니다. Worker polling 주기는 내부 기본값 5분으로 고정되어 있습니다.
+`NODE_ENV`, `HOST`, `PORT`, DB URL, workspace root, 암호화 key, session secret, 리뷰 동시성, worker polling 주기, diff/context byte limit은 새 설치에서 입력하지 않습니다. 로컬 web은 기본 `127.0.0.1:3000`, Docker app은 이미지 기본 `0.0.0.0:3000`을 사용합니다. DB 경로, workspace root, diff/context byte limit은 앱 내부 기본값을 사용하고, secret은 자동 생성값을 사용합니다. 리뷰 job 동시성은 내부 기본값 3을 사용합니다. Worker polling 주기는 내부 기본값 5분으로 고정되어 있습니다.
 
 `PORT`를 바꾸면 `PUBLIC_BASE_URL`의 port도 같이 바꿔야 GitLab OAuth redirect URI가 맞습니다. 실제 브라우저 접속 URL, `PUBLIC_BASE_URL`, GitLab OAuth Redirect URI는 같은 origin이어야 합니다. 앱은 다른 origin으로 들어온 page 요청을 `PUBLIC_BASE_URL` origin으로 자동 redirect합니다.
 
@@ -144,7 +162,7 @@ npm run db:deploy
 
 ## systemd 예시
 
-아래 예시는 `/opt/gitlab-codex-reviewer`에 배포한 경우입니다.
+아래 예시는 Docker 없이 `/opt/gitlab-codex-reviewer`에 배포한 경우입니다.
 
 Web:
 

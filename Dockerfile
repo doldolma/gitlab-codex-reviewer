@@ -105,4 +105,4 @@ VOLUME ["/app/.data"]
 EXPOSE 3000
 
 ENTRYPOINT ["tini", "--"]
-CMD ["npm", "run", "start:web"]
+CMD ["node", "scripts/start-container.mjs"]

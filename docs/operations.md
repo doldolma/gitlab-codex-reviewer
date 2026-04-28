@@ -4,7 +4,7 @@
 
 ## 리뷰 흐름
 
-worker는 Next web process와 분리된 별도 Node process에서 실행됩니다. 일반 경로는 GitLab webhook이 review job을 즉시 큐에 넣고, 5분 polling은 webhook 누락이나 서버 downtime 복구용 fallback으로 유지합니다.
+worker는 Next web process와 분리된 별도 Node process에서 실행됩니다. Docker 배포에서는 같은 `app` 컨테이너 안에서 web과 worker를 함께 띄우고, Node 직접 운영에서는 두 프로세스를 supervisor가 각각 관리합니다. 일반 경로는 GitLab webhook이 review job을 즉시 큐에 넣고, 5분 polling은 webhook 누락이나 서버 downtime 복구용 fallback으로 유지합니다.
 
 1. enabled project subscription을 읽고 GitLab numeric project id 기준으로 shared project group을 만듭니다.
 2. Reviewer Bot Token이 연결되어 있는지 확인합니다.
@@ -94,7 +94,7 @@ Commit comment에는 다음 marker가 포함됩니다.
 
 ## Workspace Checkout
 
-worker는 `WORKSPACE_ROOT` 아래 project별 workspace를 만듭니다. 기본값은 `.data/workspaces`입니다.
+worker는 `.data/workspaces` 아래 project별 workspace를 만듭니다.
 
 - workspace 디렉터리명은 `gitlab_host + numeric project id`를 해시해서 만듭니다.
 - 최초 접근 시 Reviewer Bot Token으로 `git clone --no-checkout`을 수행합니다.
@@ -122,7 +122,7 @@ Dashboard:
 - 관리자는 Codex 연결/해제 관리
 - Reviewer Bot 연결 상태 확인
 - 현재 로그인한 사용자의 enabled project 수, 관측 MR 수, 실패 리뷰 수 확인
-- `스캔 시작`으로 현재 로그인한 사용자 project의 fallback scan을 즉시 실행
+- `프로젝트 추가`로 Projects 화면으로 이동
 
 Projects:
 
@@ -241,7 +241,7 @@ worker와 webhook 자동 생성은 Reviewer Bot Token이 없으면 GitLab 조회
 
 - Projects 화면의 Webhook 상태와 오류 메시지
 - `PUBLIC_BASE_URL`이 GitLab 서버에서 접근 가능한 URL인지
-- reverse proxy가 `/api/gitlab/webhook`을 web process로 전달하는지
+- reverse proxy가 `/api/gitlab/webhook`을 app process로 전달하는지
 - 운영 환경에서 HTTPS 인증서가 정상인지
 - Reviewer Bot 계정이 대상 project에서 `Maintainer` 이상인지
 - PAT scope에 `api`가 포함되어 있는지
@@ -252,7 +252,7 @@ worker와 webhook 자동 생성은 Reviewer Bot Token이 없으면 GitLab 조회
 확인할 것:
 
 - 서버에 `git` 명령이 설치되어 있는지
-- `WORKSPACE_ROOT`에 worker 실행 계정의 읽기/쓰기 권한이 있는지
+- `.data/workspaces`에 worker 실행 계정의 읽기/쓰기 권한이 있는지
 - Bot 계정에 `read_repository` 권한이 있는지
 - project의 HTTP clone URL을 GitLab API가 반환하는지
 - force-push 등으로 리뷰 대상 SHA가 더 이상 fetch 가능한 commit인지

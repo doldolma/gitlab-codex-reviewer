@@ -58,7 +58,7 @@ CODEX_HOME="$(pwd)/.data/codex" codex login --device-auth
 Docker Compose 배포에서는 같은 `.data` volume을 사용하므로 다음 명령도 같은 Codex 인증 저장소를 사용합니다.
 
 ```bash
-docker compose run --rm web codex login --device-auth
+docker compose run --rm app codex login --device-auth
 ```
 
 ## Docker sandbox 동작

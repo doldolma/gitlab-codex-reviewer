@@ -13,6 +13,7 @@
     "build": "npm run prisma:generate && next build && tsc -p tsconfig.worker.json && node scripts/fix-worker-imports.mjs",
     "start:web": "npm run db:deploy && node scripts/next-cli.mjs start",
     "start:worker": "node dist/worker/index.js",
+    "start:container": "node scripts/start-container.mjs",
     "start": "npm run start:web",
     "test": "vitest run src",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.worker.json --noEmit"
