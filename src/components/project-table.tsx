@@ -155,6 +155,9 @@ function ProjectRow({
     onUpdateReleaseNotes?.(project.id, nextEnabled);
   }
 
+  const projectTitle = [project.displayName, project.webUrl].filter(Boolean).join("\n");
+  const namespaceLabel = project.namespaceName ?? "GitLab 그룹 없음";
+
   return (
     <tr>
       <td>
@@ -168,9 +171,9 @@ function ProjectRow({
               <ExternalLink size={16} />
             </span>
           )}
-          <div>
-            <strong>{project.displayName}</strong>
-            <small>{project.webUrl ?? "GitLab URL 없음"}</small>
+          <div className="project-cell-text" title={projectTitle}>
+            <strong>{project.projectName}</strong>
+            <small>{namespaceLabel}</small>
           </div>
         </div>
       </td>

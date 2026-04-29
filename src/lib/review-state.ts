@@ -25,6 +25,8 @@ export type ProjectRow = {
   gitlabProjectRefId: number | null;
   gitlabProjectId: string;
   displayName: string;
+  projectName: string;
+  namespaceName: string | null;
   webUrl: string | null;
   enabled: boolean;
   skipLabels: string[];
@@ -1990,12 +1992,19 @@ export class ReviewStateStore {
 
 function projectFromRow(row: Project & { gitlabProject?: GitlabProject | null }): ProjectRow {
   const gitlabProject = "gitlabProject" in row ? row.gitlabProject : null;
+  const displayParts = projectDisplayParts({
+    nameWithNamespace: gitlabProject?.nameWithNamespace ?? null,
+    pathWithNamespace: gitlabProject?.pathWithNamespace ?? null,
+    displayName: row.displayName
+  });
   return {
     id: row.id,
     userId: row.userId,
     gitlabProjectRefId: row.gitlabProjectRefId,
     gitlabProjectId: row.gitlabProjectId,
     displayName: row.displayName,
+    projectName: displayParts.projectName,
+    namespaceName: displayParts.namespaceName,
     webUrl: gitlabProject?.webUrl ?? null,
     enabled: row.enabled,
     skipLabels: parseJsonArray(row.skipLabelsJson),
@@ -2013,6 +2022,30 @@ function projectFromRow(row: Project & { gitlabProject?: GitlabProject | null })
     webhookLastVerifiedAt: gitlabProject?.webhookLastVerifiedAt ?? null,
     webhookError: gitlabProject?.webhookError ?? null
   };
+}
+
+export function projectDisplayParts(input: {
+  nameWithNamespace?: string | null;
+  pathWithNamespace?: string | null;
+  displayName: string;
+}): { projectName: string; namespaceName: string | null } {
+  const source = firstNonEmpty(input.nameWithNamespace, input.pathWithNamespace, input.displayName) ?? input.displayName;
+  const trimmed = source.trim();
+  const parts = splitProjectPath(trimmed);
+  if (parts.length <= 1) return { projectName: trimmed || input.displayName, namespaceName: null };
+  return {
+    projectName: parts[parts.length - 1] ?? trimmed,
+    namespaceName: parts.slice(0, -1).join(" / ")
+  };
+}
+
+function firstNonEmpty(...values: Array<string | null | undefined>): string | null {
+  return values.find((value) => Boolean(value?.trim()))?.trim() ?? null;
+}
+
+function splitProjectPath(value: string): string[] {
+  const delimiter = value.includes(" / ") ? /\s+\/\s+/ : "/";
+  return value.split(delimiter).map((part) => part.trim()).filter(Boolean);
 }
 
 function gitlabProjectFromRow(row: GitlabProject): GitlabProjectRow {

@@ -1,8 +1,46 @@
 import { describe, expect, it } from "vitest";
-import { ReviewStateStore } from "../lib/review-state";
+import { projectDisplayParts, ReviewStateStore } from "../lib/review-state";
 import { insertTestUser, testDb } from "./test-utils";
 
 describe("multi-user review state", () => {
+  it("derives project list display names from GitLab namespace metadata", () => {
+    expect(projectDisplayParts({
+      nameWithNamespace: "RENEW / LIME / basket-cli",
+      pathWithNamespace: null,
+      displayName: "legacy"
+    })).toEqual({
+      projectName: "basket-cli",
+      namespaceName: "RENEW / LIME"
+    });
+
+    expect(projectDisplayParts({
+      nameWithNamespace: null,
+      pathWithNamespace: "company/product/service",
+      displayName: "legacy"
+    })).toEqual({
+      projectName: "service",
+      namespaceName: "company / product"
+    });
+
+    expect(projectDisplayParts({
+      nameWithNamespace: null,
+      pathWithNamespace: "single-project",
+      displayName: "legacy"
+    })).toEqual({
+      projectName: "single-project",
+      namespaceName: null
+    });
+
+    expect(projectDisplayParts({
+      nameWithNamespace: null,
+      pathWithNamespace: null,
+      displayName: "Legacy Project"
+    })).toEqual({
+      projectName: "Legacy Project",
+      namespaceName: null
+    });
+  });
+
   it("allows different users to register the same GitLab project independently", async () => {
     const db = await testDb();
     const state = new ReviewStateStore(db);

@@ -605,14 +605,18 @@ select:disabled {
 
 .project-cell {
   display: grid;
-  grid-template-columns: 36px minmax(160px, 1fr);
+  grid-template-columns: 36px minmax(0, 1fr);
   gap: 10px;
   align-items: center;
-  min-width: 260px;
+  min-width: 280px;
+}
+
+.project-cell-text {
+  min-width: 0;
 }
 
 .project-cell strong {
-  max-width: 280px;
+  display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -620,7 +624,6 @@ select:disabled {
 
 .project-cell small {
   display: block;
-  max-width: 280px;
   color: #69727d;
   font-size: 11px;
   overflow: hidden;

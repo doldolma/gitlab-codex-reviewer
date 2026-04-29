@@ -65,6 +65,8 @@ export type Project = {
   gitlabProjectRefId: number | null;
   gitlabProjectId: string;
   displayName: string;
+  projectName: string;
+  namespaceName: string | null;
   webUrl: string | null;
   enabled: boolean;
   skipLabels: string[];

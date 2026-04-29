@@ -1141,6 +1141,8 @@ export class ReviewWorker {
         gitlabProjectRefId: null,
         gitlabProjectId,
         displayName,
+        projectName: displayName,
+        namespaceName: null,
         webUrl: null,
         enabled: true,
         skipLabels: [],
