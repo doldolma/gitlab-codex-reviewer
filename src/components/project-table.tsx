@@ -60,7 +60,7 @@ export function ProjectTable({
             <th>릴리즈노트</th>
             <th>Webhook</th>
             <th>상태</th>
-            <th />
+            <th className="project-actions-column" />
           </tr>
         </thead>
         <tbody>
@@ -221,7 +221,7 @@ function ProjectRow({
           {enabled ? "활성" : "일시정지"}
         </button>
       </td>
-      <td className="right">
+      <td className="right project-actions-column">
         <div className="button-row end">
           {onConfigure && (
             <button className="icon-button" onClick={() => onConfigure(project)} title="리뷰 설정">

@@ -147,7 +147,7 @@ select {
 }
 
 .page {
-  width: min(1180px, calc(100vw - 48px));
+  width: min(1380px, calc(100% - 48px));
   margin: 0 auto;
   padding: 32px 0;
 }
@@ -504,7 +504,7 @@ select:disabled {
 
 .compact-input {
   width: 100%;
-  min-width: 140px;
+  min-width: 0;
 }
 
 .strategy-select {
@@ -513,7 +513,43 @@ select:disabled {
 
 .project-settings-table th,
 .project-settings-table td {
-  padding: 10px 12px;
+  padding: 10px;
+}
+
+.project-settings-table {
+  table-layout: fixed;
+}
+
+.project-settings-table th:nth-child(1),
+.project-settings-table td:nth-child(1) {
+  width: 25%;
+}
+
+.project-settings-table th:nth-child(2),
+.project-settings-table td:nth-child(2),
+.project-settings-table th:nth-child(3),
+.project-settings-table td:nth-child(3) {
+  width: 13%;
+}
+
+.project-settings-table th:nth-child(4),
+.project-settings-table td:nth-child(4) {
+  width: 10%;
+}
+
+.project-settings-table th:nth-child(5),
+.project-settings-table td:nth-child(5) {
+  width: 11%;
+}
+
+.project-settings-table th:nth-child(6),
+.project-settings-table td:nth-child(6) {
+  width: 14%;
+}
+
+.project-settings-table th:nth-child(7),
+.project-settings-table td:nth-child(7) {
+  width: 9%;
 }
 
 .table-heading-with-tooltip {
@@ -608,7 +644,7 @@ select:disabled {
   grid-template-columns: 36px minmax(0, 1fr);
   gap: 10px;
   align-items: center;
-  min-width: 280px;
+  min-width: 0;
 }
 
 .project-cell-text {
@@ -646,8 +682,61 @@ select:disabled {
   overflow-y: visible;
 }
 
+.pagination-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-top: 12px;
+  padding-top: 14px;
+  border-top: 1px solid #e8edf2;
+}
+
+.pagination-summary {
+  color: #69727d;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.pagination-controls {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.page-button {
+  min-width: 38px;
+}
+
+.page-button.active {
+  background: #0f6a5f;
+  border-color: #0f6a5f;
+  color: #ffffff;
+}
+
+.pagination-ellipsis {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  color: #69727d;
+  font-weight: 700;
+}
+
 .project-table-wrap {
-  overflow: visible;
+  overflow-x: visible;
+  overflow-y: visible;
+}
+
+.project-actions-column {
+  width: 124px;
+  min-width: 124px;
+  max-width: 124px;
+}
+
+.project-actions-column .button-row {
+  flex-wrap: nowrap;
 }
 
 table {
@@ -1446,6 +1535,15 @@ code {
   .project-table-wrap {
     overflow-x: auto;
     overflow-y: visible;
+  }
+
+  .pagination-bar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .pagination-controls {
+    justify-content: flex-start;
   }
 }
 

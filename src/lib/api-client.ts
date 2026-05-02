@@ -140,6 +140,15 @@ export type ReviewMeta = {
   totalTokens: number | null;
 };
 
+export type PaginationInfo = {
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+  hasPrev: boolean;
+  hasNext: boolean;
+};
+
 export type MergeRequest = {
   id: number;
   projectId: number;
@@ -162,6 +171,12 @@ export type MergeRequest = {
   structuredReview: StructuredReview | null;
   errorMessage: string | null;
   reviewMeta: ReviewMeta | null;
+};
+
+export type MergeRequestListResponse = {
+  mergeRequests: MergeRequest[];
+  pagination: PaginationInfo;
+  activeCount: number;
 };
 
 export type CommitReview = {
@@ -188,6 +203,12 @@ export type CommitReview = {
   structuredReview: StructuredReview | null;
   errorMessage: string | null;
   reviewMeta: ReviewMeta | null;
+};
+
+export type CommitReviewListResponse = {
+  commitReviews: CommitReview[];
+  pagination: PaginationInfo;
+  activeCount: number;
 };
 
 export type ReleaseNote = {

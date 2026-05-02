@@ -1,14 +1,17 @@
 "use client";
 
-import { type FormEvent, useState } from "react";
+import { type FormEvent, useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ExternalLink, Play, RefreshCw, RotateCcw, XCircle } from "lucide-react";
 import { AppShell } from "../../components/app-shell";
 import { CommitReviewDrawer } from "../../components/commit-review-drawer";
 import { BranchCombobox, CommitCombobox, GitLabProjectCombobox } from "../../components/gitlab-combobox";
+import { PaginationControls } from "../../components/pagination-controls";
 import { ReviewMetaSummary } from "../../components/review-meta-summary";
-import { apiGet, apiSend, type CommitReview, type ReviewJob, type ReviewStrategy } from "../../lib/api-client";
+import { apiGet, apiSend, type CommitReview, type CommitReviewListResponse, type PaginationInfo, type ReviewJob, type ReviewStrategy } from "../../lib/api-client";
 import { commitReviewExternalLink } from "../../lib/review-links";
+
+const COMMIT_REVIEW_PAGE_SIZE = 20;
 
 export default function CommitReviewsPage() {
   const queryClient = useQueryClient();
@@ -17,15 +20,23 @@ export default function CommitReviewsPage() {
   const [branchName, setBranchName] = useState("");
   const [reviewStrategy, setReviewStrategy] = useState<ReviewStrategy>("auto");
   const [selected, setSelected] = useState<CommitReview | null>(null);
+  const [page, setPage] = useState(1);
 
   const commitReviews = useQuery({
-    queryKey: ["commit-reviews"],
-    queryFn: () => apiGet<{ commitReviews: CommitReview[] }>("/api/commit-reviews"),
-    refetchInterval: (query) => (hasActiveReviews(query.state.data?.commitReviews ?? []) ? 1000 : false)
+    queryKey: ["commit-reviews", page, COMMIT_REVIEW_PAGE_SIZE],
+    queryFn: () => apiGet<CommitReviewListResponse>(`/api/commit-reviews?page=${page}&pageSize=${COMMIT_REVIEW_PAGE_SIZE}`),
+    refetchInterval: (query) =>
+      hasActiveReviews(query.state.data?.commitReviews ?? []) || (query.state.data?.activeCount ?? 0) > 0 ? 1000 : false
   });
   const reviews = commitReviews.data?.commitReviews ?? [];
+  const pagination = commitReviews.data?.pagination ?? defaultPagination(page);
   const selectedReview = selected ? reviews.find((review) => review.id === selected.id) ?? selected : null;
-  const activeCount = reviews.filter((review) => isActiveStatus(review.status)).length;
+  const activeCount = commitReviews.data?.activeCount ?? reviews.filter((review) => isActiveStatus(review.status)).length;
+
+  useEffect(() => {
+    const responsePage = commitReviews.data?.pagination.page;
+    if (responsePage && responsePage !== page) setPage(responsePage);
+  }, [commitReviews.data?.pagination.page, page]);
 
   const manualReview = useMutation({
     mutationFn: (payload: { gitlabProjectId: string; commitSha: string; branchName?: string; reviewStrategy: ReviewStrategy }) =>
@@ -33,6 +44,7 @@ export default function CommitReviewsPage() {
     onSuccess: (result) => {
       setCommitSha("");
       setSelected(result.commitReview);
+      setPage(1);
       void queryClient.invalidateQueries({ queryKey: ["commit-reviews"] });
     },
     onError: () => {
@@ -177,13 +189,14 @@ export default function CommitReviewsPage() {
                 {!reviews.length && (
                   <tr>
                     <td colSpan={8} className="empty">
-                      아직 커밋 리뷰가 없습니다
+                      {pagination.total > 0 ? "이 페이지에 표시할 커밋 리뷰가 없습니다" : "아직 커밋 리뷰가 없습니다"}
                     </td>
                   </tr>
                 )}
               </tbody>
             </table>
           </div>
+          <PaginationControls pagination={pagination} label="커밋 리뷰 페이지" itemLabel="커밋 리뷰" onPageChange={setPage} />
         </section>
         <CommitReviewDrawer
           review={selectedReview}
@@ -299,4 +312,15 @@ function isActiveStatus(status: string | null): boolean {
 
 function hasActiveReviews(reviews: CommitReview[]): boolean {
   return reviews.some((review) => isActiveStatus(review.status));
+}
+
+function defaultPagination(page: number): PaginationInfo {
+  return {
+    page,
+    pageSize: COMMIT_REVIEW_PAGE_SIZE,
+    total: 0,
+    totalPages: 0,
+    hasPrev: false,
+    hasNext: false
+  };
 }

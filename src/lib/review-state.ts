@@ -161,6 +161,27 @@ export type CommitReviewRunView = {
   reviewMeta: ReviewMeta | null;
 };
 
+export type PaginationInfo = {
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+  hasPrev: boolean;
+  hasNext: boolean;
+};
+
+export type MergeRequestViewPage = {
+  mergeRequests: MergeRequestView[];
+  pagination: PaginationInfo;
+  activeCount: number;
+};
+
+export type CommitReviewRunPage = {
+  commitReviews: CommitReviewRunView[];
+  pagination: PaginationInfo;
+  activeCount: number;
+};
+
 export type ReviewFeedbackRating = "helpful" | "false_positive" | "too_minor" | "missed_issue";
 
 export type ReviewRunType = "mr" | "commit";
@@ -1830,15 +1851,28 @@ export class ReviewStateStore {
     await this.db.reviewLock.deleteMany({ where: { lockKey: key } });
   }
 
-  async listMergeRequestViews(userId: number): Promise<MergeRequestView[]> {
+  async listMergeRequestViews(userId: number): Promise<MergeRequestView[]>;
+  async listMergeRequestViews(userId: number, options: { page?: number; pageSize?: number }): Promise<MergeRequestViewPage>;
+  async listMergeRequestViews(userId: number, options?: { page?: number; pageSize?: number }): Promise<MergeRequestView[] | MergeRequestViewPage> {
+    const paginated = options !== undefined;
+    const pageSize = clampPositiveInt(options?.pageSize ?? 20, 1, 100);
     const userProjects = await this.db.project.findMany();
     const projectByRef = new Map<number, Project>();
     for (const project of userProjects) {
       if (project.gitlabProjectRefId) projectByRef.set(project.gitlabProjectRefId, project);
     }
+    const [total, activeCount] = await Promise.all([
+      this.db.mergeRequest.count(),
+      this.db.reviewRun.count({ where: { status: { in: ["queued", "running"] } } })
+    ]);
+    const totalPages = total === 0 ? 0 : Math.ceil(total / pageSize);
+    const page = totalPages === 0
+      ? 1
+      : Math.min(clampPositiveInt(options?.page ?? 1, 1, Number.MAX_SAFE_INTEGER), totalPages);
     const rows = await this.db.mergeRequest.findMany({
       include: { project: true },
-      orderBy: { observedAt: "desc" }
+      orderBy: [{ observedAt: "desc" }, { id: "desc" }],
+      ...(paginated ? { skip: (page - 1) * pageSize, take: pageSize } : {})
     });
 
     const runPairs = await Promise.all(
@@ -1859,30 +1893,66 @@ export class ReviewStateStore {
       runPairs.map((pair) => pair.run?.id).filter((id): id is number => typeof id === "number")
     );
 
-    return runPairs.map(({ row, run }) => {
+    const mergeRequests = runPairs.map(({ row, run }) => {
       const displayProject = row.gitlabProjectRefId ? projectByRef.get(row.gitlabProjectRefId) ?? row.project : row.project;
       return mergeRequestViewFromRow(row, displayProject, run, run ? reviewMetaByRunId.get(run.id) ?? null : null);
     });
+    if (!paginated) return mergeRequests;
+    return {
+      mergeRequests,
+      pagination: {
+        page,
+        pageSize,
+        total,
+        totalPages,
+        hasPrev: page > 1,
+        hasNext: totalPages > 0 && page < totalPages
+      },
+      activeCount
+    };
   }
 
-  async listCommitReviewRuns(userId: number): Promise<CommitReviewRunView[]> {
+  async listCommitReviewRuns(userId: number, options: { page?: number; pageSize?: number } = {}): Promise<CommitReviewRunPage> {
+    const pageSize = clampPositiveInt(options.pageSize ?? 20, 1, 100);
     const userProjects = await this.db.project.findMany();
     const projectByRef = new Map<number, Project>();
     for (const project of userProjects) {
       if (project.gitlabProjectRefId) projectByRef.set(project.gitlabProjectRefId, project);
     }
+    const [total, activeCount] = await Promise.all([
+      this.db.commitReviewRun.count(),
+      this.db.commitReviewRun.count({ where: { status: { in: ["queued", "running"] } } })
+    ]);
+    const totalPages = total === 0 ? 0 : Math.ceil(total / pageSize);
+    const page = totalPages === 0
+      ? 1
+      : Math.min(clampPositiveInt(options.page ?? 1, 1, Number.MAX_SAFE_INTEGER), totalPages);
     const rows = await this.db.commitReviewRun.findMany({
       include: { project: true, gitlabProject: true },
-      orderBy: { startedAt: "desc" }
+      orderBy: [{ startedAt: "desc" }, { id: "desc" }],
+      skip: (page - 1) * pageSize,
+      take: pageSize
     });
     const reviewMetaByRunId = await this.reviewMetaByRunIds("commit", rows.map((row) => row.id));
-    return rows.map((row) =>
+    const commitReviews = rows.map((row) =>
       commitReviewRunFromRow(
         row,
         row.gitlabProjectRefId ? projectByRef.get(row.gitlabProjectRefId) ?? row.project : row.project,
         reviewMetaByRunId.get(row.id) ?? null
       )
     );
+    return {
+      commitReviews,
+      pagination: {
+        page,
+        pageSize,
+        total,
+        totalPages,
+        hasPrev: page > 1,
+        hasNext: totalPages > 0 && page < totalPages
+      },
+      activeCount
+    };
   }
 
   async dashboardStats(userId: number): Promise<{
@@ -2331,6 +2401,11 @@ function isCancelableRunStatus(value: string): boolean {
 
 function uniqueNonEmpty(values: string[]): string[] {
   return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
+}
+
+function clampPositiveInt(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) return min;
+  return Math.min(max, Math.max(min, Math.trunc(value)));
 }
 
 function parseJsonArray(value: string): string[] {

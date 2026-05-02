@@ -669,8 +669,8 @@ describe("multi-user review state", () => {
 
     expect(await state.hasCompletedCommitRun(userA, projectA.gitlabProjectId, "abc123")).toBe(true);
     expect(await state.hasCompletedCommitRun(userB, projectB.gitlabProjectId, "abc123")).toBe(false);
-    expect(await state.listCommitReviewRuns(userA)).toHaveLength(1);
-    expect(await state.listCommitReviewRuns(userB)).toHaveLength(1);
+    expect((await state.listCommitReviewRuns(userA)).commitReviews).toHaveLength(1);
+    expect((await state.listCommitReviewRuns(userB)).commitReviews).toHaveLength(1);
     await db.$disconnect();
   });
 
@@ -689,11 +689,101 @@ describe("multi-user review state", () => {
     );
     await state.failCommitRun(runId, new Error("review failed"));
 
-    const runs = await state.listCommitReviewRuns(userId);
+    const runs = (await state.listCommitReviewRuns(userId)).commitReviews;
     expect(runs).toHaveLength(1);
     expect(runs[0]?.projectName).toBe("group/manual-only");
     expect(runs[0]?.status).toBe("failed");
     expect(runs[0]?.reviewMeta).toBeNull();
+    await db.$disconnect();
+  });
+
+  it("paginates commit review runs and reports active counts", async () => {
+    const db = await testDb();
+    const state = new ReviewStateStore(db);
+    const userId = await insertTestUser(db, { gitlabUserId: 1, username: "alice" });
+
+    for (let index = 1; index <= 25; index += 1) {
+      const suffix = String(index).padStart(2, "0");
+      await state.startCommitRun(
+        userId,
+        null,
+        "group/manual-only",
+        "main",
+        { id: `commit-${suffix}`, title: `Commit ${suffix}` },
+        "manual"
+      );
+    }
+
+    const firstPage = await state.listCommitReviewRuns(userId, { page: 1, pageSize: 20 });
+    expect(firstPage.commitReviews).toHaveLength(20);
+    expect(firstPage.commitReviews[0]?.commitSha).toBe("commit-25");
+    expect(firstPage.pagination).toEqual({
+      page: 1,
+      pageSize: 20,
+      total: 25,
+      totalPages: 2,
+      hasPrev: false,
+      hasNext: true
+    });
+    expect(firstPage.activeCount).toBe(25);
+
+    const secondPage = await state.listCommitReviewRuns(userId, { page: 2, pageSize: 20 });
+    expect(secondPage.commitReviews.map((run) => run.commitSha)).toEqual(["commit-05", "commit-04", "commit-03", "commit-02", "commit-01"]);
+    expect(secondPage.pagination.hasPrev).toBe(true);
+    expect(secondPage.pagination.hasNext).toBe(false);
+
+    const clampedPageSize = await state.listCommitReviewRuns(userId, { page: 1, pageSize: 999 });
+    expect(clampedPageSize.pagination.pageSize).toBe(100);
+    await db.$disconnect();
+  });
+
+  it("paginates merge request views and reports active counts", async () => {
+    const db = await testDb();
+    const state = new ReviewStateStore(db);
+    const userId = await insertTestUser(db, { gitlabUserId: 1, username: "alice" });
+    const project = await state.createProject(userId, {
+      gitlabProjectId: "group/service",
+      displayName: "Service",
+      enabled: true,
+      skipLabels: []
+    });
+
+    for (let index = 1; index <= 25; index += 1) {
+      const suffix = String(index).padStart(2, "0");
+      const sha = `head-${suffix}`;
+      await state.upsertMergeRequest(project.id, {
+        iid: index,
+        title: `MR ${suffix}`,
+        web_url: `https://gitlab.example.com/group/service/-/merge_requests/${index}`,
+        sha,
+        labels: [],
+        draft: false,
+        state: "opened",
+        updated_at: new Date().toISOString()
+      });
+      await state.startRun(project.id, index, sha, "queued");
+    }
+
+    const firstPage = await state.listMergeRequestViews(userId, { page: 1, pageSize: 20 });
+    expect(firstPage.mergeRequests).toHaveLength(20);
+    expect(firstPage.mergeRequests[0]?.mrIid).toBe(25);
+    expect(firstPage.pagination).toEqual({
+      page: 1,
+      pageSize: 20,
+      total: 25,
+      totalPages: 2,
+      hasPrev: false,
+      hasNext: true
+    });
+    expect(firstPage.activeCount).toBe(25);
+
+    const secondPage = await state.listMergeRequestViews(userId, { page: 2, pageSize: 20 });
+    expect(secondPage.mergeRequests.map((mr) => mr.mrIid)).toEqual([5, 4, 3, 2, 1]);
+    expect(secondPage.pagination.hasPrev).toBe(true);
+    expect(secondPage.pagination.hasNext).toBe(false);
+
+    const clampedPageSize = await state.listMergeRequestViews(userId, { page: 1, pageSize: 999 });
+    expect(clampedPageSize.pagination.pageSize).toBe(100);
     await db.$disconnect();
   });
 
@@ -747,7 +837,7 @@ describe("multi-user review state", () => {
       "queued"
     );
 
-    const runs = await state.listCommitReviewRuns(userId);
+    const runs = (await state.listCommitReviewRuns(userId)).commitReviews;
     expect(runs[0]?.projectName).toBe("RENEW / LIME / Collector");
     await db.$disconnect();
   });
@@ -928,7 +1018,7 @@ describe("multi-user review state", () => {
       metadata: { inputTokens: 1200, outputTokens: 300, reasoningOutputTokens: 80, totalTokens: 1500 }
     });
 
-    const runs = await state.listCommitReviewRuns(userId);
+    const runs = (await state.listCommitReviewRuns(userId)).commitReviews;
     expect(runs[0]?.reviewMeta).toEqual({
       model: "gpt-5.5",
       reasoningEffort: "xhigh",

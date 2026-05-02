@@ -7,13 +7,15 @@ export function MrReviewTable({
   onRetry,
   onCancel,
   isCanceling,
-  onSelect
+  onSelect,
+  emptyMessage = "관측된 Merge Request가 없습니다"
 }: {
   mergeRequests: MergeRequest[];
   onRetry: (runId: number) => void;
   onCancel?: (runId: number) => void;
   isCanceling?: boolean;
   onSelect: (mr: MergeRequest) => void;
+  emptyMessage?: string;
 }) {
   return (
     <div className="table-wrap">
@@ -69,7 +71,7 @@ export function MrReviewTable({
           {!mergeRequests.length && (
             <tr>
               <td colSpan={7} className="empty">
-                관측된 Merge Request가 없습니다
+                {emptyMessage}
               </td>
             </tr>
           )}
