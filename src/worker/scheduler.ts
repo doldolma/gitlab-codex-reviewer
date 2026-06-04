@@ -28,8 +28,8 @@ export class ReviewScheduler {
     this.nextScanAt = 0;
     while (!this.stopped) {
       try {
-        await this.worker.processQueuedJobs(this.config.reviewConcurrency);
-        if (Date.now() >= this.nextScanAt) {
+        await this.worker.fillQueuedJobSlots(this.config.reviewConcurrency);
+        if (this.worker.activeJobCount() === 0 && Date.now() >= this.nextScanAt) {
           await this.worker.scanOnce();
           this.nextScanAt = Date.now() + this.config.pollIntervalSeconds * 1000;
         }

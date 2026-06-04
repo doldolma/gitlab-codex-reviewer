@@ -69,6 +69,7 @@ class ReviewCanceledError extends Error {
 export class ReviewWorker {
   private running = false;
   private missingReviewerBotWarningShown = false;
+  private readonly activeJobs = new Map<number, Promise<"processed" | "deferred" | "failed" | "canceled">>();
 
   constructor(
     private readonly config: AppConfig,
@@ -277,14 +278,31 @@ export class ReviewWorker {
     return run;
   }
 
-  async processQueuedJobs(limit = 3): Promise<{ processed: number; deferred: number; failed: number; canceled: number }> {
-    const recovered = await this.state.recoverStaleRunningJobs(STALE_REVIEW_JOB_MS);
-    if (recovered > 0) {
-      console.warn(`[worker] [review] Recovered ${recovered} stale running review job(s).`);
+  activeJobCount(): number {
+    return this.activeJobs.size;
+  }
+
+  async fillQueuedJobSlots(limit = 3): Promise<{ started: number; active: number; recovered: number }> {
+    const recovered = await this.recoverStaleRunningJobs();
+
+    const maxActive = Math.max(0, Math.floor(limit));
+    let started = 0;
+    while (this.activeJobs.size < maxActive) {
+      const job = await this.state.claimNextReviewJob();
+      if (!job) break;
+      this.startClaimedJob(job);
+      started += 1;
     }
 
+    return { started, active: this.activeJobs.size, recovered };
+  }
+
+  async processQueuedJobs(limit = 3): Promise<{ processed: number; deferred: number; failed: number; canceled: number }> {
+    await this.recoverStaleRunningJobs();
+
     const jobs: ReviewJobView[] = [];
-    for (let index = 0; index < limit; index += 1) {
+    const maxJobs = Math.max(0, Math.floor(limit));
+    for (let index = 0; index < maxJobs; index += 1) {
       const job = await this.state.claimNextReviewJob();
       if (!job) break;
       jobs.push(job);
@@ -297,6 +315,26 @@ export class ReviewWorker {
       failed: results.filter((result) => result === "failed").length,
       canceled: results.filter((result) => result === "canceled").length
     };
+  }
+
+  private async recoverStaleRunningJobs(): Promise<number> {
+    const recovered = await this.state.recoverStaleRunningJobs(STALE_REVIEW_JOB_MS);
+    if (recovered > 0) {
+      console.warn(`[worker] [review] Recovered ${recovered} stale running review job(s).`);
+    }
+    return recovered;
+  }
+
+  private startClaimedJob(job: ReviewJobView): void {
+    const promise = this.processClaimedJob(job)
+      .catch((error) => {
+        console.error(`[worker] [review] Active job crashed: id=${job.id}, kind=${job.kind}`, error);
+        return "failed" as const;
+      })
+      .finally(() => {
+        this.activeJobs.delete(job.id);
+      });
+    this.activeJobs.set(job.id, promise);
   }
 
   private async processClaimedJob(job: ReviewJobView): Promise<"processed" | "deferred" | "failed" | "canceled"> {

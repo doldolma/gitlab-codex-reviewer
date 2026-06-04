@@ -2,6 +2,62 @@ import { describe, expect, it, vi } from "vitest";
 import { ReviewWorker } from "../worker/review-worker";
 import { testConfig } from "./test-utils";
 
+describe("ReviewWorker job pool", () => {
+  it("starts queued jobs up to the active slot limit and refills freed slots", async () => {
+    const { worker, state } = workerWithQueue([poolJob(1), poolJob(2), poolJob(3)]);
+    const first = deferred<"processed">();
+    const second = deferred<"processed">();
+    const third = deferred<"processed">();
+    const processor = vi.fn((job: { id: number }) => {
+      if (job.id === 1) return first.promise;
+      if (job.id === 2) return second.promise;
+      return third.promise;
+    });
+    (worker as any).processClaimedJob = processor;
+
+    const started = await worker.fillQueuedJobSlots(2);
+
+    expect(started).toEqual({ started: 2, active: 2, recovered: 0 });
+    expect(state.claimNextReviewJob).toHaveBeenCalledTimes(2);
+    expect(processor).toHaveBeenCalledTimes(2);
+    expect(worker.activeJobCount()).toBe(2);
+
+    const saturated = await worker.fillQueuedJobSlots(2);
+    expect(saturated.started).toBe(0);
+    expect(state.claimNextReviewJob).toHaveBeenCalledTimes(2);
+
+    first.resolve("processed");
+    await flushPromises();
+    expect(worker.activeJobCount()).toBe(1);
+
+    const refilled = await worker.fillQueuedJobSlots(2);
+    expect(refilled.started).toBe(1);
+    expect(worker.activeJobCount()).toBe(2);
+    expect(processor).toHaveBeenCalledWith(expect.objectContaining({ id: 3 }));
+
+    second.resolve("processed");
+    third.resolve("processed");
+    await flushPromises();
+    expect(worker.activeJobCount()).toBe(0);
+  });
+
+  it("removes crashed jobs from the active pool", async () => {
+    const { worker } = workerWithQueue([poolJob(1)]);
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const failure = deferred<"processed">();
+    (worker as any).processClaimedJob = vi.fn(() => failure.promise);
+
+    await worker.fillQueuedJobSlots(1);
+    expect(worker.activeJobCount()).toBe(1);
+
+    failure.reject(new Error("boom"));
+    await flushPromises();
+
+    expect(worker.activeJobCount()).toBe(0);
+    consoleError.mockRestore();
+  });
+});
+
 describe("ReviewWorker project job prelude", () => {
   it("requeues shared-project jobs when the project lock is busy", async () => {
     const { worker, state } = workerWithState({ projectLockAvailable: false });
@@ -102,6 +158,49 @@ function workerWithState({ projectLockAvailable }: { projectLockAvailable: boole
   };
   const worker = new ReviewWorker(testConfig(), {} as any, state as any, reviewerBot as any);
   return { worker, state };
+}
+
+function workerWithQueue(jobs: ReturnType<typeof poolJob>[]) {
+  const queue = [...jobs];
+  const state = {
+    recoverStaleRunningJobs: vi.fn().mockResolvedValue(0),
+    claimNextReviewJob: vi.fn(async () => queue.shift() ?? null)
+  };
+  const worker = new ReviewWorker(testConfig(), {} as any, state as any, {} as any);
+  return { worker, state };
+}
+
+function poolJob(id: number) {
+  return {
+    id,
+    kind: "commit_webhook",
+    status: "running",
+    userId: 1,
+    runType: "commit",
+    runId: id * 10,
+    payload: { gitlabProjectId: String(id), commitSha: `sha-${id}` },
+    attempts: 1,
+    errorMessage: null,
+    createdAt: "2026-04-28T00:00:00.000Z",
+    updatedAt: "2026-04-28T00:00:00.000Z",
+    startedAt: "2026-04-28T00:00:00.000Z",
+    finishedAt: null
+  };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
+}
+
+async function flushPromises(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
 }
 
 function releaseNoteJob() {
