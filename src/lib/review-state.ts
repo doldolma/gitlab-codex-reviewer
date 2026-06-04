@@ -1457,12 +1457,14 @@ export class ReviewStateStore {
     return reviewJobFromRow(row);
   }
 
-  async claimNextReviewJob(): Promise<ReviewJobView | null> {
+  async claimNextReviewJob(options: { excludedGitlabProjectRefIds?: number[] } = {}): Promise<ReviewJobView | null> {
+    const excludedGitlabProjectRefIds = new Set(options.excludedGitlabProjectRefIds ?? []);
     for (let attempt = 0; attempt < 5; attempt += 1) {
-      const next = await this.db.reviewJob.findFirst({
+      const candidates = await this.db.reviewJob.findMany({
         where: { status: "queued", updatedAt: { lte: nowIso() } },
         orderBy: [{ updatedAt: "asc" }, { id: "asc" }]
       });
+      const next = candidates.find((candidate) => !excludedGitlabProjectRefIds.has(gitlabProjectRefIdFromJob(candidate)));
       if (!next) return null;
 
       const timestamp = nowIso();
@@ -2424,6 +2426,10 @@ function parseJsonRecord(value: string): Record<string, unknown> {
   } catch {
     return {};
   }
+}
+
+function gitlabProjectRefIdFromJob(job: ReviewJob): number {
+  return numberFromMetadata(parseJsonRecord(job.payloadJson), "gitlabProjectRefId") ?? 0;
 }
 
 function emptyReviewMeta(): ReviewMeta {

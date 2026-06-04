@@ -58,6 +58,8 @@ type EventContextSeed = {
 const REVIEW_JOB_HEARTBEAT_MS = 30_000;
 const STALE_REVIEW_JOB_MS = 2 * 60_000;
 const REVIEW_JOB_CANCEL_POLL_MS = 1_000;
+const PROJECT_BUSY_REQUEUE_DELAY_MS = 60_000;
+const MAX_BUSY_REQUEUE_ATTEMPTS = 45;
 
 class ReviewCanceledError extends Error {
   constructor() {
@@ -70,6 +72,8 @@ export class ReviewWorker {
   private running = false;
   private missingReviewerBotWarningShown = false;
   private readonly activeJobs = new Map<number, Promise<"processed" | "deferred" | "failed" | "canceled">>();
+  private readonly activeProjectRefs = new Map<number, number>();
+  private readonly projectCooldownUntil = new Map<number, number>();
 
   constructor(
     private readonly config: AppConfig,
@@ -288,7 +292,9 @@ export class ReviewWorker {
     const maxActive = Math.max(0, Math.floor(limit));
     let started = 0;
     while (this.activeJobs.size < maxActive) {
-      const job = await this.state.claimNextReviewJob();
+      const job = await this.state.claimNextReviewJob({
+        excludedGitlabProjectRefIds: [...this.excludedProjectRefs()]
+      });
       if (!job) break;
       this.startClaimedJob(job);
       started += 1;
@@ -326,15 +332,49 @@ export class ReviewWorker {
   }
 
   private startClaimedJob(job: ReviewJobView): void {
-    const promise = this.processClaimedJob(job)
+    const gitlabProjectRefId = numberFromPayload(job.payload, "gitlabProjectRefId");
+    if (gitlabProjectRefId) this.incrementActiveProjectRef(gitlabProjectRefId);
+    const promise = Promise.resolve()
+      .then(() => this.processClaimedJob(job))
       .catch((error) => {
         console.error(`[worker] [review] Active job crashed: id=${job.id}, kind=${job.kind}`, error);
         return "failed" as const;
       })
       .finally(() => {
         this.activeJobs.delete(job.id);
+        if (gitlabProjectRefId) this.decrementActiveProjectRef(gitlabProjectRefId);
       });
     this.activeJobs.set(job.id, promise);
+  }
+
+  private excludedProjectRefs(): Set<number> {
+    const now = Date.now();
+    const refs = new Set(this.activeProjectRefs.keys());
+    for (const [gitlabProjectRefId, cooldownUntil] of this.projectCooldownUntil) {
+      if (cooldownUntil > now) {
+        refs.add(gitlabProjectRefId);
+      } else {
+        this.projectCooldownUntil.delete(gitlabProjectRefId);
+      }
+    }
+    return refs;
+  }
+
+  private incrementActiveProjectRef(gitlabProjectRefId: number): void {
+    this.activeProjectRefs.set(gitlabProjectRefId, (this.activeProjectRefs.get(gitlabProjectRefId) ?? 0) + 1);
+  }
+
+  private decrementActiveProjectRef(gitlabProjectRefId: number): void {
+    const nextCount = (this.activeProjectRefs.get(gitlabProjectRefId) ?? 1) - 1;
+    if (nextCount > 0) {
+      this.activeProjectRefs.set(gitlabProjectRefId, nextCount);
+    } else {
+      this.activeProjectRefs.delete(gitlabProjectRefId);
+    }
+  }
+
+  private cooldownProjectRef(gitlabProjectRefId: number, delayMs: number): void {
+    this.projectCooldownUntil.set(gitlabProjectRefId, Date.now() + delayMs);
   }
 
   private async processClaimedJob(job: ReviewJobView): Promise<"processed" | "deferred" | "failed" | "canceled"> {
@@ -483,7 +523,8 @@ export class ReviewWorker {
 
     const projectLockKey = projectLockKeyFor(sharedProject);
     if (!(await this.state.acquireLock(projectLockKey))) {
-      await this.requeueBusyJob(job, busyMessage, checkCancellation, context ?? undefined);
+      this.cooldownProjectRef(gitlabProjectRefId, PROJECT_BUSY_REQUEUE_DELAY_MS);
+      await this.requeueBusyJob(job, busyMessage, checkCancellation, context ?? undefined, PROJECT_BUSY_REQUEUE_DELAY_MS);
       return "deferred";
     }
 
@@ -860,10 +901,24 @@ export class ReviewWorker {
     job: ReviewJobView,
     message: string,
     checkCancellation?: CancellationCheck,
-    context?: EventContext
+    context?: EventContext,
+    delayMs?: number
   ): Promise<void> {
     await ensureNotCanceled(undefined, checkCancellation);
-    await this.state.requeueReviewJob(job.id, message);
+    if (job.attempts >= MAX_BUSY_REQUEUE_ATTEMPTS) {
+      const error = new Error(`${message} Maximum busy retry attempts exceeded.`);
+      if (context) {
+        await this.recordEvent(
+          context,
+          "error",
+          "job_busy_retry_exhausted",
+          "Review job exceeded the maximum number of busy retries.",
+          { jobId: job.id, kind: job.kind, attempts: job.attempts, maxAttempts: MAX_BUSY_REQUEUE_ATTEMPTS }
+        );
+      }
+      throw error;
+    }
+    await this.state.requeueReviewJob(job.id, message, delayMs);
     await ensureNotCanceled(undefined, checkCancellation);
     const eventContext = context ?? (
       job.runType && job.runId

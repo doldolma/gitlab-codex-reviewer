@@ -1196,6 +1196,41 @@ describe("multi-user review state", () => {
     await db.$disconnect();
   });
 
+  it("claims the next queued job outside excluded GitLab project refs", async () => {
+    const db = await testDb();
+    const state = new ReviewStateStore(db);
+    const userId = await insertTestUser(db, { gitlabUserId: 1, username: "alice" });
+
+    const first = await state.createReviewJob({
+      kind: "commit_webhook",
+      userId,
+      runType: "commit",
+      runId: null,
+      payload: { gitlabProjectRefId: 101, gitlabProjectId: "101", commitSha: "a1" }
+    });
+    const second = await state.createReviewJob({
+      kind: "commit_webhook",
+      userId,
+      runType: "commit",
+      runId: null,
+      payload: { gitlabProjectRefId: 101, gitlabProjectId: "101", commitSha: "a2" }
+    });
+    const third = await state.createReviewJob({
+      kind: "commit_webhook",
+      userId,
+      runType: "commit",
+      runId: null,
+      payload: { gitlabProjectRefId: 202, gitlabProjectId: "202", commitSha: "b1" }
+    });
+
+    const claimed = await state.claimNextReviewJob({ excludedGitlabProjectRefIds: [101] });
+
+    expect(claimed?.id).toBe(third.id);
+    expect((await db.reviewJob.findUnique({ where: { id: first.id } }))?.status).toBe("queued");
+    expect((await db.reviewJob.findUnique({ where: { id: second.id } }))?.status).toBe("queued");
+    await db.$disconnect();
+  });
+
   it("recovers stale running review jobs and queues them again", async () => {
     const db = await testDb();
     const state = new ReviewStateStore(db);
