@@ -7,6 +7,7 @@ import {
   type CodexReviewRuntimeSettings
 } from "./codex-review-settings";
 import { createCodexRuntime } from "./codex-runtime";
+import { runOpenAICompatibleAgent, splitPrompt, type ToolRunResult } from "./openai-compatible-agent";
 import {
   RELEASE_NOTE_OUTPUT_SCHEMA,
   buildReleaseNotePrompt,
@@ -117,6 +118,96 @@ export class CodexReleaseNoteEngine implements ReleaseNoteWriter {
       usage
     };
   }
+}
+
+export type OpenAICompatibleReleaseNoteEngineOptions = {
+  webTools?: boolean;
+  searchUrl?: string | null;
+};
+
+export class OpenAICompatibleReleaseNoteEngine implements ReleaseNoteWriter {
+  constructor(private readonly options: OpenAICompatibleReleaseNoteEngineOptions = {}) {}
+
+  async write(
+    input: ReleaseNotePromptInput,
+    onEvent?: (event: ReleaseNoteEngineEvent) => Promise<void> | void,
+    settings?: CodexReviewRuntimeSettings,
+    options: { signal?: AbortSignal } = {}
+  ): Promise<ReleaseNoteResult> {
+    if (!settings || settings.provider !== "openai_compatible") {
+      throw new Error("OpenAICompatibleReleaseNoteEngine requires the openai_compatible provider");
+    }
+    const { system, user } = splitPrompt(buildReleaseNotePrompt(input));
+    const { raw, usage } = await runOpenAICompatibleAgent({
+      runtime: {
+        baseUrl: settings.baseUrl,
+        apiKey: settings.apiKey,
+        model: settings.model,
+        contextWindow: settings.contextWindow
+      },
+      system,
+      user,
+      outputSchema: RELEASE_NOTE_OUTPUT_SCHEMA,
+      schemaName: "release_note",
+      workspace: input.workingDirectory ?? null,
+      enableThinking: settings.reasoningEffort !== "minimal",
+      webTools: this.options.webTools,
+      searchUrl: this.options.searchUrl,
+      onToolEvent: (result) => emitCompatibleToolEvent(onEvent, result),
+      signal: options.signal
+    });
+
+    const trimmed = raw.trim();
+    if (!trimmed) throw new Error("AI release note response was empty");
+    const structured = parseStructuredReleaseNote(trimmed);
+
+    await emit(onEvent, {
+      level: "info",
+      step: "codex_message",
+      message: "AI provider produced final release note response.",
+      metadata: {
+        responseBytes: Buffer.byteLength(trimmed, "utf8"),
+        title: structured.title,
+        highlightCount: structured.highlights.length,
+        improvementCount: structured.improvements.length,
+        fixCount: structured.fixes.length,
+        provider: settings.provider,
+        providerLabel: settings.providerLabel
+      }
+    });
+    await emit(onEvent, {
+      level: "info",
+      step: "codex_usage",
+      message: "AI provider release note usage recorded.",
+      metadata: {
+        inputTokens: usage.input_tokens,
+        outputTokens: usage.output_tokens,
+        totalTokens: usage.input_tokens + usage.output_tokens,
+        provider: settings.provider,
+        providerLabel: settings.providerLabel
+      }
+    });
+
+    return { markdown: renderReleaseNoteMarkdown(structured), raw: trimmed, structured, usage };
+  }
+}
+
+async function emitCompatibleToolEvent(
+  onEvent: ((event: ReleaseNoteEngineEvent) => Promise<void> | void) | undefined,
+  result: ToolRunResult
+): Promise<void> {
+  await emit(onEvent, {
+    level: result.status === "failed" ? "warn" : "info",
+    step: "codex_tool_used",
+    message: "AI provider executed a shell command for release note context.",
+    metadata: {
+      tool: "command_execution",
+      command: result.command.slice(0, 500),
+      status: result.status,
+      exitCode: result.exitCode,
+      outputPreview: result.outputPreview
+    }
+  });
 }
 
 async function collectReleaseNoteEvents(

@@ -5,9 +5,12 @@ import {
   type CodexReviewReasoningEffort
 } from "./codex-review-settings";
 import { createCodexRuntime } from "./codex-runtime";
+import { runOpenAICompatibleAgent, splitPrompt } from "./openai-compatible-agent";
 import type { ReviewPromptInput } from "./prompts";
 import { REVIEW_PROMPT_VERSION } from "./prompts";
 import type { ReviewRiskLevel } from "./review-strategy";
+
+const TRIAGE_MAX_OUTPUT_TOKENS = 2_048;
 
 export const TRIAGE_OUTPUT_SCHEMA = {
   type: "object",
@@ -74,6 +77,38 @@ export class CodexReviewTriageEngine implements ReviewTriageRunner {
       raw,
       usage
     };
+  }
+}
+
+export class OpenAICompatibleTriageEngine implements ReviewTriageRunner {
+  async triage(
+    input: ReviewTriageInput,
+    settings: CodexReviewModelSettings,
+    options: { signal?: AbortSignal } = {}
+  ): Promise<ReviewTriageResult> {
+    if (settings.provider !== "openai_compatible") {
+      throw new Error("OpenAICompatibleTriageEngine requires the openai_compatible provider");
+    }
+    const { system, user } = splitPrompt(buildTriagePrompt(input));
+    const { raw, usage } = await runOpenAICompatibleAgent({
+      runtime: {
+        baseUrl: settings.baseUrl,
+        apiKey: settings.apiKey,
+        model: settings.model,
+        contextWindow: settings.contextWindow
+      },
+      system,
+      user,
+      outputSchema: TRIAGE_OUTPUT_SCHEMA,
+      schemaName: "review_triage",
+      workspace: input.workingDirectory ?? null,
+      enableThinking: false,
+      maxOutputTokens: TRIAGE_MAX_OUTPUT_TOKENS,
+      signal: options.signal
+    });
+    const trimmed = raw.trim();
+    if (!trimmed) throw new Error("AI triage response was empty");
+    return { ...parseTriageResult(trimmed), raw: trimmed, usage };
   }
 }
 

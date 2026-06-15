@@ -51,6 +51,34 @@ function chatJson(body: unknown): Response {
   return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) } as Response;
 }
 
+function errorResponse(status: number): Response {
+  return { ok: false, status, json: async () => ({}), text: async () => `error ${status}` } as Response;
+}
+
+function htmlResponse(html: string): Response {
+  return {
+    ok: true,
+    status: 200,
+    headers: { get: () => "text/html" } as unknown as Headers,
+    text: async () => html,
+    json: async () => ({})
+  } as Response;
+}
+
+const toolCall = (name: string, args: unknown) => ({
+  choices: [
+    {
+      finish_reason: "tool_calls",
+      message: {
+        role: "assistant",
+        content: null,
+        tool_calls: [{ id: "c1", type: "function", function: { name, arguments: JSON.stringify(args) } }]
+      }
+    }
+  ],
+  usage: { prompt_tokens: 8, completion_tokens: 4 }
+});
+
 const toolCallResponse = (command: string) => ({
   choices: [
     {
@@ -127,5 +155,104 @@ describe("OpenAICompatibleReviewEngine", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it("retries transient errors then succeeds (#2)", async () => {
+    let calls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        calls += 1;
+        return calls === 1 ? errorResponse(503) : chatJson(finalizeResponse);
+      })
+    );
+
+    const result = await new OpenAICompatibleReviewEngine().review(input(), undefined, settings);
+    expect(result.structured.assessment).toBe("safe");
+    expect(calls).toBe(2);
+  });
+
+  it("does not retry deterministic 4xx errors", async () => {
+    const fetchMock = vi.fn(async () => errorResponse(400));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(new OpenAICompatibleReviewEngine().review(input(), undefined, settings)).rejects.toThrow("(400)");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("truncates oversized input to fit a small context window (#1)", async () => {
+    let sentUser = "";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string | URL, init?: RequestInit) => {
+        sentUser = JSON.parse(init?.body as string).messages[1].content;
+        return chatJson(finalizeResponse);
+      })
+    );
+
+    const bigInput: ReviewPromptInput = { ...input(), diffText: "X".repeat(60_000) };
+    await new OpenAICompatibleReviewEngine().review(bigInput, undefined, { ...settings, contextWindow: 9000 });
+
+    expect(sentUser).toContain("input truncated");
+    expect(sentUser.length).toBeLessThan(60_000);
+  });
+
+  it("uses fetch_url to read a page and feeds it back (web tools)", async () => {
+    const bodies: Record<string, unknown>[] = [];
+    let step = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL, init?: RequestInit) => {
+        if (String(url).endsWith("/chat/completions")) {
+          const body = JSON.parse(init?.body as string);
+          bodies.push(body);
+          if (body.response_format) return chatJson(finalizeResponse);
+          step += 1;
+          return step === 1
+            ? chatJson(toolCall("fetch_url", { url: "https://pkg.go.dev/errors" }))
+            : chatJson(stopResponse);
+        }
+        return htmlResponse("<html><body>func AsType[E error](err error) (E, bool)</body></html>");
+      })
+    );
+
+    const result = await new OpenAICompatibleReviewEngine({ webTools: true }).review(input(), undefined, settings);
+
+    expect(result.structured.assessment).toBe("safe");
+    const explore = bodies.find((b) => (b as { tools?: unknown }).tools) as { tools: { function: { name: string } }[] };
+    const toolNames = explore.tools.map((t) => t.function.name);
+    expect(toolNames).toContain("fetch_url");
+    expect(toolNames).not.toContain("web_search"); // no search backend configured
+    const finalize = bodies.find((b) => b.response_format) as { messages: { role: string; content: string }[] };
+    const toolResults = finalize.messages.filter((m) => m.role === "tool").map((m) => m.content);
+    expect(toolResults.some((c) => c.includes("func AsType"))).toBe(true);
+  });
+
+  it("exposes web_search only when a search backend is configured, and queries it", async () => {
+    const bodies: Record<string, unknown>[] = [];
+    let step = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL, init?: RequestInit) => {
+        if (String(url).endsWith("/chat/completions")) {
+          const body = JSON.parse(init?.body as string);
+          bodies.push(body);
+          if (body.response_format) return chatJson(finalizeResponse);
+          step += 1;
+          return step === 1 ? chatJson(toolCall("web_search", { query: "errors.AsType go" })) : chatJson(stopResponse);
+        }
+        // SearXNG-style JSON backend
+        return chatJson({ results: [{ title: "errors - pkg.go.dev", url: "https://pkg.go.dev/errors", content: "AsType finds the first error." }] });
+      })
+    );
+
+    await new OpenAICompatibleReviewEngine({ webTools: true, searchUrl: "http://searx.local/search" }).review(input(), undefined, settings);
+
+    const explore = bodies.find((b) => (b as { tools?: unknown }).tools) as { tools: { function: { name: string } }[] };
+    expect(explore.tools.map((t) => t.function.name)).toContain("web_search");
+    const finalize = bodies.find((b) => b.response_format) as { messages: { role: string; content: string }[] };
+    const toolResults = finalize.messages.filter((m) => m.role === "tool").map((m) => m.content);
+    expect(toolResults.some((c) => c.includes("https://pkg.go.dev/errors"))).toBe(true);
+    expect(toolResults.some((c) => c.includes("AsType finds the first error"))).toBe(true);
   });
 });

@@ -11,11 +11,11 @@ import { ReviewerBotService } from "./reviewer-bot";
 import { CodexReviewEngine } from "./review-engine";
 import { CodexReviewSettingsService } from "./codex-review-settings";
 import { GitLabWebhookService } from "./gitlab-webhooks";
-import { CodexReviewTriageEngine } from "./review-triage";
-import { CodexReleaseNoteEngine } from "./release-note-engine";
+import { CodexReviewTriageEngine, OpenAICompatibleTriageEngine } from "./review-triage";
+import { CodexReleaseNoteEngine, OpenAICompatibleReleaseNoteEngine } from "./release-note-engine";
 import { OpenAICompatibleConnectionVerifier } from "./openai-compatible-verifier";
 import { OpenAICompatibleReviewEngine } from "./openai-compatible-review-engine";
-import { ProviderReviewer } from "./provider-reviewer";
+import { ProviderReleaseNoteWriter, ProviderReviewer, ProviderTriageRunner } from "./provider-reviewer";
 
 export const config = loadConfig();
 process.env.CODEX_HOME = config.codexHome;
@@ -35,18 +35,27 @@ export const codexReviewEngine = new CodexReviewEngine({
   codexHome: config.codexHome,
   sandboxMode: config.codexSandboxMode
 });
-export const compatibleReviewEngine = new OpenAICompatibleReviewEngine();
+const webToolsConfig = {
+  webTools: process.env.REVIEW_WEB_TOOLS !== "0" && process.env.REVIEW_WEB_TOOLS !== "false",
+  searchUrl: process.env.REVIEW_SEARCH_URL || null
+};
+export const compatibleReviewEngine = new OpenAICompatibleReviewEngine(webToolsConfig);
 export const reviewEngine = new ProviderReviewer(codexReviewEngine, compatibleReviewEngine);
-export const reviewTriageEngine = new CodexReviewTriageEngine({
+export const codexReviewTriageEngine = new CodexReviewTriageEngine({
   codexBin: config.codexBin,
   codexHome: config.codexHome,
   sandboxMode: config.codexSandboxMode
 });
-export const releaseNoteEngine = new CodexReleaseNoteEngine({
+export const reviewTriageEngine = new ProviderTriageRunner(codexReviewTriageEngine, new OpenAICompatibleTriageEngine());
+export const codexReleaseNoteEngine = new CodexReleaseNoteEngine({
   codexBin: config.codexBin,
   codexHome: config.codexHome,
   sandboxMode: config.codexSandboxMode
 });
+export const releaseNoteEngine = new ProviderReleaseNoteWriter(
+  codexReleaseNoteEngine,
+  new OpenAICompatibleReleaseNoteEngine(webToolsConfig)
+);
 export const reviewWorker = new ReviewWorker(
   config,
   gitlabOAuth,
