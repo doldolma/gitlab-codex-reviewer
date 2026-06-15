@@ -133,7 +133,7 @@ Commit Reviews:
 Settings:
 
 - GitLab OAuth redirect URI 확인
-- Codex 연결과 전역 리뷰 모델 설정
+- Codex 계정/OpenAI 호환 API 선택과 전역 리뷰 모델 설정
 - Reviewer Bot Token 저장, 검증, 연결 해제
 - 사용자 역할 관리
 
@@ -143,7 +143,7 @@ Settings:
 - `running`: 리뷰 실행 중
 - `no_findings`: 액션 필요한 이슈 없음
 - `commented`: GitLab 댓글 작성 완료
-- `failed`: GitLab API, Codex, DB 등에서 오류 발생
+- `failed`: GitLab API, AI provider, DB 등에서 오류 발생
 - `canceled`: 사용자가 취소함
 - `pending`: MR은 관측됐지만 아직 리뷰 이력이 없음
 
@@ -211,6 +211,17 @@ Settings:
 - `.data/codex`에 앱 실행 계정의 읽기/쓰기 권한이 있는지
 - Docker에서는 `docker compose run --rm app codex login --device-auth`로 수동 로그인이 되는지
 - ChatGPT 보안 설정에서 device code 인증이 허용되어 있는지
+
+### OpenAI 호환 API 연결 테스트 실패
+
+확인할 것:
+
+- Base URL이 `/v1/responses`를 제공하는지
+- served model name이 Settings 입력과 같은지
+- 모델이 Responses API tool calling과 JSON Schema 출력을 지원하는지
+- vLLM에 적절한 `--reasoning-parser`, `--enable-auto-tool-choice`, `--tool-call-parser`가 설정됐는지
+- 앱 컨테이너에서 AI 서버 주소로 접근 가능한지
+- `Unexpected message role` 오류라면 vLLM의 chat template와 Codex SDK가 보내는 Responses API message 형식이 호환되는지
 
 ### SQLite 또는 `.data` 권한 오류
 

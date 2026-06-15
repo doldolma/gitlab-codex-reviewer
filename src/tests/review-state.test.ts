@@ -1020,6 +1020,8 @@ describe("multi-user review state", () => {
 
     const runs = (await state.listCommitReviewRuns(userId)).commitReviews;
     expect(runs[0]?.reviewMeta).toEqual({
+      provider: "codex",
+      providerLabel: "Codex 계정",
       model: "gpt-5.5",
       reasoningEffort: "xhigh",
       promptVersion: "ko-workspace-review-v3",
@@ -1083,6 +1085,8 @@ describe("multi-user review state", () => {
 
     const rows = await state.listMergeRequestViews(userId);
     expect(rows[0]?.reviewMeta).toEqual({
+      provider: "codex",
+      providerLabel: "Codex 계정",
       model: "gpt-5.5",
       reasoningEffort: "xhigh",
       promptVersion: "ko-workspace-review-v3",

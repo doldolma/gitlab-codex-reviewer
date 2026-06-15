@@ -9,7 +9,8 @@ export function ReviewMetaSummary({ meta }: { meta: ReviewMeta | null }) {
     <div className="review-meta-summary">
       {(meta.model || meta.reasoningEffort) && (
         <span>
-          {meta.model ?? "Codex"}
+          {meta.providerLabel ? `${meta.providerLabel} · ` : ""}
+          {meta.model ?? "AI"}
           {meta.reviewStrategy ? ` · ${strategyExecutionLabel(meta.reviewStrategy, meta.reasoningEffort)}` : meta.reasoningEffort ? ` · ${meta.reasoningEffort}` : ""}
         </span>
       )}
@@ -21,7 +22,9 @@ export function ReviewMetaSummary({ meta }: { meta: ReviewMeta | null }) {
 
 function hasReviewMeta(meta: ReviewMeta): boolean {
   return Boolean(
-    meta.model ||
+    meta.provider ||
+      meta.providerLabel ||
+      meta.model ||
       meta.reasoningEffort ||
       meta.promptVersion ||
       meta.reviewStrategy ||

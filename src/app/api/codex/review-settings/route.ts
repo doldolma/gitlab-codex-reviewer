@@ -10,14 +10,25 @@ import { codexReviewSettings } from "../../../../lib/services";
 
 export const runtime = "nodejs";
 
-const settingsInput = z.object({
-  model: z.string()
-});
+const settingsInput = z.discriminatedUnion("provider", [
+  z.object({
+    provider: z.literal("codex"),
+    model: z.string()
+  }),
+  z.object({
+    provider: z.literal("openai_compatible"),
+    baseUrl: z.string(),
+    model: z.string(),
+    contextWindow: z.number().int(),
+    apiKey: z.string().optional(),
+    clearApiKey: z.boolean().optional()
+  })
+]);
 
 export async function GET() {
   const user = await requireSessionUser();
   if (isAuthFailure(user)) return user;
-  return NextResponse.json(await codexReviewSettings.getEffectiveReviewSettings());
+  return NextResponse.json(await codexReviewSettings.getEffectiveReviewSettings(user.role === "admin"));
 }
 
 export async function PATCH(request: Request) {

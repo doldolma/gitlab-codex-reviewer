@@ -82,12 +82,18 @@ model ReviewerBotConnection {
 }
 
 model CodexReviewSettings {
-  id              Int    @id @default(1)
-  model           String
-  reasoningEffort String @map("reasoning_effort")
-  updatedByUserId Int?   @map("updated_by_user_id")
-  createdAt       String @map("created_at")
-  updatedAt       String @map("updated_at")
+  id                        Int     @id @default(1)
+  model                     String
+  reasoningEffort           String  @map("reasoning_effort")
+  provider                  String  @default("codex")
+  compatibleBaseUrl         String? @map("compatible_base_url")
+  compatibleModel           String? @map("compatible_model")
+  compatibleContextWindow   Int     @default(131072) @map("compatible_context_window")
+  compatibleApiKeyEncrypted String? @map("compatible_api_key_encrypted")
+  compatibleLastVerifiedAt  String? @map("compatible_last_verified_at")
+  updatedByUserId           Int?    @map("updated_by_user_id")
+  createdAt                 String  @map("created_at")
+  updatedAt                 String  @map("updated_at")
 
   @@map("codex_review_settings")
 }

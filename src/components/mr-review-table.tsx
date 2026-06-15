@@ -26,7 +26,7 @@ export function MrReviewTable({
             <th>프로젝트</th>
             <th>Head SHA</th>
             <th>리뷰</th>
-            <th>Codex</th>
+            <th>AI</th>
             <th>마지막 리뷰</th>
             <th />
           </tr>

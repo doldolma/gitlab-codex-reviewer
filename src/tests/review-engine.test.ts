@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { REVIEW_OUTPUT_SCHEMA, buildReviewPrompt, parseStructuredReview, renderReviewMarkdown, shouldTreatAsFindings, type StructuredReview } from "../lib/prompts";
 import { CodexReviewEngine, type ReviewEngineEvent } from "../lib/review-engine";
 import { CodexReviewTriageEngine, TRIAGE_OUTPUT_SCHEMA } from "../lib/review-triage";
+import { defaultModelSettings, runtimeSettings } from "../lib/codex-review-settings";
 
 const codexMocks = vi.hoisted(() => {
   const runStreamed = vi.fn();
@@ -115,7 +116,7 @@ describe("CodexReviewEngine", () => {
         workingDirectory: "/workspaces/service"
       },
       undefined,
-      { model: "gpt-5.4", reasoningEffort: "high" }
+      runtimeSettings({ ...defaultModelSettings(), model: "gpt-5.4" }, "high")
     );
 
     expect(codexMocks.startThread).toHaveBeenCalledWith(
@@ -124,6 +125,53 @@ describe("CodexReviewEngine", () => {
         modelReasoningEffort: "high"
       })
     );
+  });
+
+  it("runs OpenAI compatible models through the Codex custom provider", async () => {
+    codexMocks.runStreamed.mockResolvedValue({ events: eventsForReview(noFindingsReview()) });
+
+    await new CodexReviewEngine({ codexBin: "/opt/codex", codexHome: "/srv/app/.data/codex" }).review(
+      {
+        kind: "commit",
+        repoName: "group/service",
+        sha: "abc123",
+        diffText: "diff text",
+        workingDirectory: "/workspaces/service"
+      },
+      undefined,
+      {
+        provider: "openai_compatible",
+        providerLabel: "OpenAI 호환 API",
+        model: "qwen-coder",
+        baseUrl: "http://qwen.internal:8000/v1",
+        apiKey: "secret-key",
+        contextWindow: 131072,
+        reasoningEffort: "high"
+      }
+    );
+
+    expect(codexMocks.Codex).toHaveBeenCalledWith(
+      expect.objectContaining({
+        codexPathOverride: "/opt/codex",
+        env: expect.objectContaining({
+          CODEX_HOME: "/srv/app/.data/codex",
+          OPENAI_COMPATIBLE_API_KEY: "secret-key"
+        }),
+        config: {
+          model_provider: "openai_compatible",
+          model_context_window: 131072,
+          model_providers: {
+            openai_compatible: {
+              name: "OpenAI Compatible",
+              base_url: "http://qwen.internal:8000/v1",
+              env_key: "OPENAI_COMPATIBLE_API_KEY",
+              wire_api: "responses"
+            }
+          }
+        }
+      })
+    );
+    expect(codexMocks.startThread).toHaveBeenCalledWith(expect.objectContaining({ model: "qwen-coder" }));
   });
 
   it("passes abort signal to streamed review turns", async () => {
@@ -343,7 +391,7 @@ describe("CodexReviewEngine", () => {
         sha: "abc123",
         diffText: "diff text"
       })
-    ).rejects.toThrow("Codex review response was empty");
+    ).rejects.toThrow("AI review response was empty");
   });
 
   it("runs Codex triage with medium reasoning and parses the recommended effort", async () => {
@@ -370,7 +418,7 @@ describe("CodexReviewEngine", () => {
         omittedFiles: 0,
         workingDirectory: "/workspaces/service"
       },
-      { model: "gpt-5.5" }
+      defaultModelSettings()
     );
 
     expect(codexMocks.startThread).toHaveBeenCalledWith(
@@ -415,7 +463,7 @@ describe("CodexReviewEngine", () => {
         diffTruncated: false,
         omittedFiles: 0
       },
-      { model: "gpt-5.5" },
+      defaultModelSettings(),
       { signal: controller.signal }
     );
 

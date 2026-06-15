@@ -2,8 +2,8 @@ import type { ReviewEvent } from "../lib/api-client";
 import type { ReactNode } from "react";
 import { CheckCircle2, Cpu, Gauge, MessageSquareText, SlidersHorizontal, Terminal, XCircle } from "lucide-react";
 
-const PROGRESS_STAGES = ["대기 중", "GitLab diff 준비", "workspace checkout", "Codex 리뷰", "결과 게시", "완료"];
-const RELEASE_NOTE_PROGRESS_STAGES = ["대기 중", "태그 비교 준비", "Codex 작성", "GitLab 게시", "완료"];
+const PROGRESS_STAGES = ["대기 중", "GitLab diff 준비", "workspace checkout", "AI 리뷰", "결과 게시", "완료"];
+const RELEASE_NOTE_PROGRESS_STAGES = ["대기 중", "태그 비교 준비", "AI 작성", "GitLab 게시", "완료"];
 
 export function ReviewProgressSummary({ events, status }: { events: ReviewEvent[]; status: string | null }) {
   const activeIndex = progressIndex(events, status);
@@ -105,13 +105,15 @@ function CheckpointEvent({ event }: { event: ReviewEvent }) {
 
 function CodexStartedEvent({ event }: { event: ReviewEvent }) {
   const model = stringMetadata(event, "model") ?? "Codex";
+  const provider = stringMetadata(event, "providerLabel") ?? "Codex 계정";
   const effort = stringMetadata(event, "modelReasoningEffort");
   const promptVersion = stringMetadata(event, "promptVersion");
-  const title = event.runType === "release_note" ? "Codex 릴리즈노트 작성 시작" : "Codex 리뷰 시작";
+  const title = event.runType === "release_note" ? "AI 릴리즈노트 작성 시작" : "AI 리뷰 시작";
   return (
     <li className="event-item codex-activity">
       <EventHeader event={event} icon={<Cpu size={16} />} title={title} />
       <div className="activity-badges">
+        <span>{provider}</span>
         <span>{model}</span>
         {effort && <span>{effort}</span>}
         {promptVersion && <span>{promptVersion}</span>}
@@ -185,7 +187,7 @@ function CodexMessageEvent({ event }: { event: ReviewEvent }) {
 
   return (
     <li className="event-item codex-activity codex-message">
-      <EventHeader event={event} icon={<MessageSquareText size={16} />} title="Codex 메시지" badge={hasFindings ? "이슈 있음" : "이슈 없음"} />
+      <EventHeader event={event} icon={<MessageSquareText size={16} />} title="AI 메시지" badge={hasFindings ? "이슈 있음" : "이슈 없음"} />
       <div className="activity-meta-row">
         {assessment && <span>{assessment}</span>}
         {issueCount !== null && <span>이슈 {issueCount}개</span>}
@@ -349,11 +351,11 @@ const STEP_LABELS: Record<string, string> = {
   codex_triage_started: "Auto triage 시작",
   codex_triage_finished: "Auto triage 완료",
   codex_triage_failed: "Auto triage 실패",
-  codex_started: "Codex 리뷰 시작",
+  codex_started: "AI 리뷰 시작",
   codex_tool_used: "도구 사용",
-  codex_message: "Codex 메시지",
+  codex_message: "AI 메시지",
   codex_usage: "토큰 사용량",
-  codex_finished: "Codex 리뷰 완료",
+  codex_finished: "AI 리뷰 완료",
   release_publish_started: "GitLab Release 게시 시작",
   release_published: "GitLab Release 게시 완료",
   comment_posted: "댓글 게시",
@@ -372,8 +374,8 @@ const RELEASE_NOTE_STEP_LABELS: Record<string, string> = {
   job_claimed: "worker 작업 시작",
   bot_token_loaded: "Reviewer Bot 토큰 확인",
   lock_acquired: "릴리즈노트 lock 획득",
-  codex_started: "Codex 릴리즈노트 작성 시작",
-  codex_finished: "Codex 릴리즈노트 작성 완료",
+  codex_started: "AI 릴리즈노트 작성 시작",
+  codex_finished: "AI 릴리즈노트 작성 완료",
   codex_usage: "토큰 사용량"
 };
 
@@ -410,8 +412,8 @@ const EVENT_MESSAGES: Record<string, string> = {
   codex_triage_started: "Auto 전략이 본 리뷰 강도를 판단하고 있습니다.",
   codex_triage_finished: "Auto triage가 본 리뷰 강도를 선택했습니다.",
   codex_triage_failed: "Auto triage가 실패해 안전 기본값으로 진행합니다.",
-  codex_started: "Codex 리뷰가 시작되었습니다.",
-  codex_finished: "Codex 리뷰가 완료되었습니다.",
+  codex_started: "AI 리뷰가 시작되었습니다.",
+  codex_finished: "AI 리뷰가 완료되었습니다.",
   release_publish_started: "GitLab Release 게시를 시작했습니다.",
   release_published: "GitLab Release를 게시했습니다.",
   comment_posted: "GitLab 댓글을 게시했습니다.",
@@ -431,19 +433,21 @@ const RELEASE_NOTE_EVENT_MESSAGES: Record<string, string> = {
   bot_token_loaded: "Reviewer Bot 토큰을 확인했습니다.",
   project_lock_acquired: "프로젝트 단위 lock을 획득했습니다.",
   lock_acquired: "릴리즈노트 lock을 획득했습니다.",
-  codex_started: "Codex 릴리즈노트 작성이 시작되었습니다.",
-  codex_finished: "Codex 릴리즈노트 작성이 완료되었습니다.",
-  codex_usage: "Codex 릴리즈노트 작성 토큰 사용량을 기록했습니다."
+  codex_started: "AI 릴리즈노트 작성이 시작되었습니다.",
+  codex_finished: "AI 릴리즈노트 작성이 완료되었습니다.",
+  codex_usage: "AI 릴리즈노트 작성 토큰 사용량을 기록했습니다."
 };
 
 function reviewModelLabel(events: ReviewEvent[]): string | null {
   const metadata = events.find((event) => event.step === "codex_started")?.metadata;
   const model = metadata?.model;
+  const provider = metadata?.providerLabel;
   const effort = metadata?.modelReasoningEffort;
   const strategy = metadata?.reviewStrategy;
   if (typeof model !== "string") return null;
-  if (typeof strategy === "string" && typeof effort === "string") return `${model} / ${strategy} → ${effort}`;
-  return typeof effort === "string" ? `${model} / ${effort}` : model;
+  const prefix = typeof provider === "string" ? `${provider} / ` : "";
+  if (typeof strategy === "string" && typeof effort === "string") return `${prefix}${model} / ${strategy} → ${effort}`;
+  return typeof effort === "string" ? `${prefix}${model} / ${effort}` : `${prefix}${model}`;
 }
 
 function stringMetadata(event: ReviewEvent, key: string): string | null {

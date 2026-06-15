@@ -1,10 +1,12 @@
-import { Codex, type SandboxMode, type ThreadEvent, type ThreadItem, type Usage } from "@openai/codex-sdk";
+import type { SandboxMode, ThreadEvent, ThreadItem, Usage } from "@openai/codex-sdk";
 import {
   DEFAULT_CODEX_REVIEW_MODEL,
   DEFAULT_CODEX_REVIEW_REASONING_EFFORT,
+  defaultRuntimeSettings,
   type CodexReviewReasoningEffort,
   type CodexReviewRuntimeSettings
 } from "./codex-review-settings";
+import { createCodexRuntime } from "./codex-runtime";
 import {
   RELEASE_NOTE_OUTPUT_SCHEMA,
   buildReleaseNotePrompt,
@@ -54,13 +56,15 @@ export class CodexReleaseNoteEngine implements ReleaseNoteWriter {
     settings?: CodexReviewRuntimeSettings,
     options: { signal?: AbortSignal } = {}
   ): Promise<ReleaseNoteResult> {
-    const codex = new Codex({
-      ...(this.options.codexBin ? { codexPathOverride: this.options.codexBin } : {}),
-      env: codexEnv(this.options.codexHome)
-    });
+    const runtime = settings ?? {
+      ...defaultRuntimeSettings(),
+      model: this.options.model ?? DEFAULT_CODEX_REVIEW_MODEL,
+      reasoningEffort: this.options.modelReasoningEffort ?? DEFAULT_CODEX_REVIEW_REASONING_EFFORT
+    };
+    const codex = createCodexRuntime(this.options, runtime);
     const thread = codex.startThread({
-      model: settings?.model ?? this.options.model ?? DEFAULT_CODEX_REVIEW_MODEL,
-      modelReasoningEffort: settings?.reasoningEffort ?? this.options.modelReasoningEffort ?? DEFAULT_CODEX_REVIEW_REASONING_EFFORT,
+      model: runtime.model,
+      modelReasoningEffort: runtime.reasoningEffort,
       ...(input.workingDirectory ? { workingDirectory: input.workingDirectory } : {}),
       skipGitRepoCheck: true,
       sandboxMode: this.options.sandboxMode ?? "read-only",
@@ -73,32 +77,36 @@ export class CodexReleaseNoteEngine implements ReleaseNoteWriter {
     });
     const { finalResponse, usage } = await collectReleaseNoteEvents(events, onEvent);
     const raw = finalResponse.trim();
-    if (!raw) throw new Error("Codex release note response was empty");
+    if (!raw) throw new Error("AI release note response was empty");
 
     const structured = parseStructuredReleaseNote(raw);
     await emit(onEvent, {
       level: "info",
       step: "codex_message",
-      message: "Codex produced final release note response.",
+      message: "AI provider produced final release note response.",
       metadata: {
         responseBytes: Buffer.byteLength(raw, "utf8"),
         title: structured.title,
         highlightCount: structured.highlights.length,
         improvementCount: structured.improvements.length,
-        fixCount: structured.fixes.length
+        fixCount: structured.fixes.length,
+        provider: runtime.provider,
+        providerLabel: runtime.providerLabel
       }
     });
     if (usage) {
       await emit(onEvent, {
         level: "info",
         step: "codex_usage",
-        message: "Codex release note usage recorded.",
+        message: "AI provider release note usage recorded.",
         metadata: {
           inputTokens: usage.input_tokens,
           cachedInputTokens: usage.cached_input_tokens,
           outputTokens: usage.output_tokens,
           reasoningOutputTokens: usage.reasoning_output_tokens,
-          totalTokens: usage.input_tokens + usage.output_tokens
+          totalTokens: usage.input_tokens + usage.output_tokens,
+          provider: runtime.provider,
+          providerLabel: runtime.providerLabel
         }
       });
     }
@@ -136,7 +144,7 @@ async function collectReleaseNoteEvents(
         await emit(onEvent, {
           level: "error",
           step: "codex_failed",
-          message: "Codex release note turn failed.",
+          message: "AI provider release note turn failed.",
           metadata: { error: event.error.message }
         });
         break;
@@ -145,7 +153,7 @@ async function collectReleaseNoteEvents(
         await emit(onEvent, {
           level: "error",
           step: "codex_failed",
-          message: "Codex release note stream failed.",
+          message: "AI provider release note stream failed.",
           metadata: { error: event.message }
         });
         break;
@@ -165,7 +173,7 @@ async function emitToolEvent(
     await emit(onEvent, {
       level: item.status === "failed" ? "warn" : "info",
       step: "codex_tool_used",
-      message: "Codex executed a shell command for release note context.",
+      message: "AI provider executed a shell command for release note context.",
       metadata: {
         tool: "command_execution",
         command: sanitizeCommand(item.command),
@@ -183,7 +191,7 @@ async function emitToolEvent(
     await emit(onEvent, {
       level: item.status === "failed" ? "warn" : "info",
       step: "codex_tool_used",
-      message: "Codex used an MCP tool for release note context.",
+      message: "AI provider used an MCP tool for release note context.",
       metadata: {
         tool: item.tool,
         server: item.server,
@@ -198,7 +206,7 @@ async function emitToolEvent(
     await emit(onEvent, {
       level: "info",
       step: "codex_tool_used",
-      message: "Codex requested web search for release note context.",
+      message: "AI provider requested web search for release note context.",
       metadata: { tool: "web_search", query: sanitizeCommand(item.query) }
     });
     return;
@@ -208,7 +216,7 @@ async function emitToolEvent(
     await emit(onEvent, {
       level: "warn",
       step: "codex_tool_used",
-      message: "Codex attempted a file change while writing release notes.",
+      message: "AI provider attempted a file change while writing release notes.",
       metadata: {
         tool: "file_change",
         status: item.status,
@@ -246,13 +254,4 @@ function redactSensitive(value: string): string {
   return value
     .replace(/(Authorization:\s*)(Basic|Bearer)\s+[A-Za-z0-9+/=._-]+/gi, "$1<redacted>")
     .replace(/(PRIVATE-TOKEN[=:\s]+)[A-Za-z0-9._-]+/gi, "$1<redacted>");
-}
-
-function codexEnv(codexHome?: string): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value !== undefined) env[key] = value;
-  }
-  if (codexHome) env.CODEX_HOME = codexHome;
-  return env;
 }

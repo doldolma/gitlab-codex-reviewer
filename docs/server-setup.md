@@ -16,7 +16,7 @@ Docker Compose 실행:
 - Docker와 Docker Compose
 - GitLab OAuth application
 - Reviewer Bot Token으로 사용할 GitLab Personal Access Token
-- Codex에 로그인할 수 있는 OpenAI/ChatGPT 계정
+- Codex에 로그인할 수 있는 OpenAI/ChatGPT 계정 또는 OpenAI Responses API 호환 서버
 
 Docker image에는 앱 실행과 리뷰 보조 분석에 필요한 `git`, `rg`, `gitleaks`, `golangci-lint`, Go toolchain, ESLint, Codex CLI가 포함됩니다.
 

@@ -25,7 +25,13 @@ export default function SettingsPage() {
   const [roleError, setRoleError] = useState<string | null>(null);
   const [botToken, setBotToken] = useState("");
   const [botError, setBotError] = useState<string | null>(null);
-  const [reviewModel, setReviewModel] = useState("");
+  const [reviewProvider, setReviewProvider] = useState<"codex" | "openai_compatible">("codex");
+  const [codexModel, setCodexModel] = useState("");
+  const [compatibleBaseUrl, setCompatibleBaseUrl] = useState("");
+  const [compatibleModel, setCompatibleModel] = useState("");
+  const [compatibleContextWindow, setCompatibleContextWindow] = useState("131072");
+  const [compatibleApiKey, setCompatibleApiKey] = useState("");
+  const [clearCompatibleApiKey, setClearCompatibleApiKey] = useState(false);
   const [reviewSettingsError, setReviewSettingsError] = useState<string | null>(null);
   const [origin, setOrigin] = useState("");
   const reviewerBot = useQuery({
@@ -84,9 +90,22 @@ export default function SettingsPage() {
     mutationFn: () =>
       apiSend<CodexReviewSettings>("/api/codex/review-settings", {
         method: "PATCH",
-        body: JSON.stringify({ model: reviewModel })
+        body: JSON.stringify(
+          reviewProvider === "codex"
+            ? { provider: "codex", model: codexModel }
+            : {
+                provider: "openai_compatible",
+                baseUrl: compatibleBaseUrl,
+                model: compatibleModel,
+                contextWindow: Number(compatibleContextWindow),
+                ...(compatibleApiKey.trim() ? { apiKey: compatibleApiKey.trim() } : {}),
+                ...(clearCompatibleApiKey ? { clearApiKey: true } : {})
+              }
+        )
       }),
     onSuccess: () => {
+      setCompatibleApiKey("");
+      setClearCompatibleApiKey(false);
       setReviewSettingsError(null);
       void queryClient.invalidateQueries({ queryKey: ["codex-review-settings"] });
       void queryClient.invalidateQueries({ queryKey: ["codex-status"] });
@@ -100,8 +119,12 @@ export default function SettingsPage() {
 
   useEffect(() => {
     if (!reviewSettings.data) return;
-    setReviewModel(reviewSettings.data.model);
-  }, [reviewSettings.data?.model]);
+    setReviewProvider(reviewSettings.data.provider);
+    setCodexModel(reviewSettings.data.codexModel);
+    setCompatibleBaseUrl(reviewSettings.data.compatible.baseUrl ?? "");
+    setCompatibleModel(reviewSettings.data.compatible.model ?? "");
+    setCompatibleContextWindow(String(reviewSettings.data.compatible.contextWindow ?? reviewSettings.data.defaults.compatibleContextWindow));
+  }, [reviewSettings.data]);
 
   const adminCount = users.data?.users.filter((user) => user.role === "admin").length ?? 0;
 
@@ -136,12 +159,16 @@ export default function SettingsPage() {
         <section className="panel">
           <div className="section-heading">
             <div>
-              <span className="eyebrow">Codex</span>
-              <h2>Codex Review</h2>
+              <span className="eyebrow">AI</span>
+              <h2>AI Review</h2>
             </div>
           </div>
           {reviewSettingsError && <div className="alert bad">{reviewSettingsError}</div>}
           <div className="settings-list">
+            <div>
+              <span>현재 Provider</span>
+              <code>{reviewSettings.data?.providerLabel ?? "Codex 계정"}</code>
+            </div>
             <div>
               <span>현재 모델</span>
               <code>{reviewSettings.data?.model ?? "gpt-5.5"}</code>
@@ -154,30 +181,118 @@ export default function SettingsPage() {
               <span>마지막 수정</span>
               <code>{formatOptionalDate(reviewSettings.data?.updatedAt)}</code>
             </div>
+            {reviewSettings.data?.provider === "openai_compatible" && (
+              <div>
+                <span>마지막 연결 검증</span>
+                <code>{formatOptionalDate(reviewSettings.data.compatible.lastVerifiedAt)}</code>
+              </div>
+            )}
           </div>
           {isAdmin && (
             <div className="bot-token-form">
-              <label>
-                <span>모델</span>
-                <input
-                  list="codex-review-model-presets"
-                  value={reviewModel}
-                  onChange={(event) => setReviewModel(event.target.value)}
-                  placeholder={reviewSettings.data?.defaults.model ?? "gpt-5.5"}
-                />
-                <datalist id="codex-review-model-presets">
-                  {reviewSettings.data?.modelPresets.map((model) => (
-                    <option key={model} value={model} />
-                  ))}
-                </datalist>
-              </label>
+              <div className="provider-segmented" role="group" aria-label="AI Provider">
+                <button
+                  type="button"
+                  className={reviewProvider === "codex" ? "active" : ""}
+                  onClick={() => setReviewProvider("codex")}
+                >
+                  Codex 계정
+                </button>
+                <button
+                  type="button"
+                  className={reviewProvider === "openai_compatible" ? "active" : ""}
+                  onClick={() => setReviewProvider("openai_compatible")}
+                >
+                  OpenAI 호환 API
+                </button>
+              </div>
+              {reviewProvider === "codex" ? (
+                <label>
+                  <span>Codex 모델</span>
+                  <input
+                    list="codex-review-model-presets"
+                    value={codexModel}
+                    onChange={(event) => setCodexModel(event.target.value)}
+                    placeholder={reviewSettings.data?.defaults.codexModel ?? "gpt-5.5"}
+                  />
+                  <datalist id="codex-review-model-presets">
+                    {reviewSettings.data?.modelPresets.map((model) => (
+                      <option key={model} value={model} />
+                    ))}
+                  </datalist>
+                </label>
+              ) : (
+                <>
+                  <label>
+                    <span>Base URL</span>
+                    <input
+                      value={compatibleBaseUrl}
+                      onChange={(event) => setCompatibleBaseUrl(event.target.value)}
+                      placeholder="http://ai-server:8000/v1"
+                    />
+                  </label>
+                  <label>
+                    <span>모델</span>
+                    <input
+                      value={compatibleModel}
+                      onChange={(event) => setCompatibleModel(event.target.value)}
+                      placeholder="served-model-name"
+                    />
+                  </label>
+                  <label>
+                    <span>Context Window</span>
+                    <input
+                      type="number"
+                      min={8192}
+                      max={2000000}
+                      step={1024}
+                      value={compatibleContextWindow}
+                      onChange={(event) => setCompatibleContextWindow(event.target.value)}
+                    />
+                  </label>
+                  <label>
+                    <span>API Key {reviewSettings.data?.compatible.apiKeyConfigured ? "(저장됨)" : "(선택)"}</span>
+                    <input
+                      type="password"
+                      value={compatibleApiKey}
+                      onChange={(event) => {
+                        setCompatibleApiKey(event.target.value);
+                        if (event.target.value) setClearCompatibleApiKey(false);
+                      }}
+                      placeholder={reviewSettings.data?.compatible.apiKeyConfigured ? "비워두면 기존 키 유지" : "vLLM 인증 미사용 시 비워두기"}
+                    />
+                  </label>
+                  {reviewSettings.data?.compatible.apiKeyConfigured && (
+                    <label className="checkbox-row">
+                      <input
+                        type="checkbox"
+                        checked={clearCompatibleApiKey}
+                        onChange={(event) => {
+                          setClearCompatibleApiKey(event.target.checked);
+                          if (event.target.checked) setCompatibleApiKey("");
+                        }}
+                      />
+                      <span>저장된 API Key 제거</span>
+                    </label>
+                  )}
+                </>
+              )}
               <div className="button-row">
                 <button
                   className="button"
                   onClick={() => updateReviewSettings.mutate()}
-                  disabled={updateReviewSettings.isPending || !reviewModel.trim()}
+                  disabled={
+                    updateReviewSettings.isPending ||
+                    (reviewProvider === "codex"
+                      ? !codexModel.trim()
+                      : !compatibleBaseUrl.trim() || !compatibleModel.trim() || !compatibleContextWindow.trim())
+                  }
                 >
-                  설정 저장
+                  {updateReviewSettings.isPending
+                    ? "연결 검증 중..."
+                    : reviewProvider === "openai_compatible"
+                      ? "연결 테스트 후 적용"
+                      : "설정 저장"}
                 </button>
               </div>
             </div>

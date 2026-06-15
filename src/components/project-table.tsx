@@ -49,7 +49,7 @@ export function ProjectTable({
                   </button>
                   <span className="tooltip-panel" role="tooltip">
                     <strong>리뷰 전략</strong>
-                    <span>Auto: Codex가 diff 위험도를 먼저 보고 medium/high/xhigh를 선택합니다.</span>
+                    <span>Auto: 선택한 AI 모델이 diff 위험도를 먼저 보고 medium/high/xhigh를 선택합니다.</span>
                     <span>빠름: medium으로 빠르게 리뷰합니다.</span>
                     <span>균형: high로 리뷰 품질과 시간을 균형 있게 가져갑니다.</span>
                     <span>정밀: xhigh로 오래 걸리더라도 깊게 리뷰합니다.</span>

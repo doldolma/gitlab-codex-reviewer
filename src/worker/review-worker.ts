@@ -34,7 +34,7 @@ import { ReadonlyToolRunner, type ToolRunnerEvent } from "../lib/tool-runner";
 
 type ScanSummary = { reviewed: number; skipped: number; errors: number };
 type ReviewSettingsProvider = {
-  getEffectiveReviewSettings(): Promise<CodexReviewModelSettings>;
+  getEffectiveRuntimeSettings(): Promise<CodexReviewModelSettings>;
 };
 type EventContext = {
   source: ReviewLogSource;
@@ -83,7 +83,7 @@ export class ReviewWorker {
     private readonly reviewer: Reviewer = new CodexReviewEngine(),
     private readonly triageRunner: ReviewTriageRunner = new CodexReviewTriageEngine(),
     private readonly reviewSettings: ReviewSettingsProvider = {
-      async getEffectiveReviewSettings() {
+      async getEffectiveRuntimeSettings() {
         return defaultModelSettings();
       }
     },
@@ -624,11 +624,13 @@ export class ReviewWorker {
             changedFileCount: changedFiles.length,
             domainContextConfigured: Boolean(domainContext.trim())
           });
-          const modelSettings = await this.reviewSettings.getEffectiveReviewSettings();
-          const settings = runtimeSettings(modelSettings.model, "xhigh");
-          await this.recordEvent(context, "info", "codex_started", "Codex release note generation started.", {
+          const modelSettings = await this.reviewSettings.getEffectiveRuntimeSettings();
+          const settings = runtimeSettings(modelSettings, "xhigh");
+          await this.recordEvent(context, "info", "codex_started", "AI release note generation started.", {
             promptVersion: RELEASE_NOTE_PROMPT_VERSION,
             model: settings.model,
+            provider: settings.provider,
+            providerLabel: settings.providerLabel,
             modelReasoningEffort: settings.reasoningEffort,
             sandboxMode: this.config.codexSandboxMode
           });
@@ -654,7 +656,7 @@ export class ReviewWorker {
             { signal }
           );
           await ensureNotCanceled(signal, checkCancellation);
-          await this.recordEvent(context, "info", "codex_finished", "Codex release note generation finished.", {
+          await this.recordEvent(context, "info", "codex_finished", "AI release note generation finished.", {
             title: result.structured.title,
             responseBytes: Buffer.byteLength(result.raw, "utf8"),
             highlightCount: result.structured.highlights.length,
@@ -1299,7 +1301,7 @@ export class ReviewWorker {
         null
       );
       const { runtimeSettings, resolution } = await this.resolveRuntimeSettings(context, project.reviewStrategy, reviewInput, formatted, reviewableDiffs, signal);
-      await this.recordEvent(context, "info", "codex_started", "Codex review started.", codexStartMetadata(runtimeSettings, resolution, this.config.codexSandboxMode));
+      await this.recordEvent(context, "info", "codex_started", "AI review started.", codexStartMetadata(runtimeSettings, resolution, this.config.codexSandboxMode));
       const result = await this.reviewer.review(
         reviewInput,
         (event) => this.recordEvent(context, event.level, event.step, event.message, event.metadata),
@@ -1307,7 +1309,7 @@ export class ReviewWorker {
         { signal }
       );
       await ensureNotCanceled(signal, checkCancellation);
-      await this.recordEvent(context, "info", "codex_finished", "Codex review finished.", {
+      await this.recordEvent(context, "info", "codex_finished", "AI review finished.", {
         hasFindings: result.hasFindings,
         responseBytes: Buffer.byteLength(result.raw, "utf8"),
         assessment: result.structured.assessment,
@@ -1317,7 +1319,7 @@ export class ReviewWorker {
         await ensureNotCanceled(signal, checkCancellation);
         const comment = await publishReviewNote(client, project.gitlabProjectId, mr.iid, headSha, result.markdown, mr.web_url);
         await this.state.finishNoFindings(runId, result.markdown, comment, result.structured);
-        await this.recordEvent(context, "info", "no_findings", "Codex completed with no actionable findings; summary comment was posted to GitLab.");
+        await this.recordEvent(context, "info", "no_findings", "AI review completed with no actionable findings; summary comment was posted to GitLab.");
         await this.recordEvent(context, "info", "comment_posted", "GitLab MR review summary comment posted.", {
           commentId: comment.id,
           skippedExistingComment: comment.skipped
@@ -1398,7 +1400,7 @@ export class ReviewWorker {
         checkout.path
       );
       const { runtimeSettings, resolution } = await this.resolveRuntimeSettings(context, gitlabProject.reviewStrategy, reviewInput, formatted, reviewableDiffs, signal);
-      await this.recordEvent(context, "info", "codex_started", "Codex review started.", codexStartMetadata(runtimeSettings, resolution, this.config.codexSandboxMode));
+      await this.recordEvent(context, "info", "codex_started", "AI review started.", codexStartMetadata(runtimeSettings, resolution, this.config.codexSandboxMode));
       const result = await this.reviewer.review(
         reviewInput,
         (event) => this.recordEvent(context, event.level, event.step, event.message, event.metadata),
@@ -1406,7 +1408,7 @@ export class ReviewWorker {
         { signal }
       );
       await ensureNotCanceled(signal, checkCancellation);
-      await this.recordEvent(context, "info", "codex_finished", "Codex review finished.", {
+      await this.recordEvent(context, "info", "codex_finished", "AI review finished.", {
         hasFindings: result.hasFindings,
         responseBytes: Buffer.byteLength(result.raw, "utf8"),
         assessment: result.structured.assessment,
@@ -1416,7 +1418,7 @@ export class ReviewWorker {
         await ensureNotCanceled(signal, checkCancellation);
         const comment = await publishReviewNote(client, gitlabProject.gitlabProjectId, mr.iid, headSha, result.markdown, mr.web_url);
         await this.state.finishNoFindings(runId, result.markdown, comment, result.structured);
-        await this.recordEvent(context, "info", "no_findings", "Codex completed with no actionable findings; summary comment was posted to GitLab.");
+        await this.recordEvent(context, "info", "no_findings", "AI review completed with no actionable findings; summary comment was posted to GitLab.");
         await this.recordEvent(context, "info", "comment_posted", "GitLab MR review summary comment posted.", {
           commentId: comment.id,
           skippedExistingComment: comment.skipped
@@ -1490,7 +1492,7 @@ export class ReviewWorker {
         null
       );
       const { runtimeSettings, resolution } = await this.resolveRuntimeSettings(context, project?.reviewStrategy ?? "balanced", reviewInput, formatted, reviewableDiffs, signal);
-      await this.recordEvent(context, "info", "codex_started", "Codex review started.", codexStartMetadata(runtimeSettings, resolution, this.config.codexSandboxMode));
+      await this.recordEvent(context, "info", "codex_started", "AI review started.", codexStartMetadata(runtimeSettings, resolution, this.config.codexSandboxMode));
       const result = await this.reviewer.review(
         reviewInput,
         (event) => this.recordEvent(context, event.level, event.step, event.message, event.metadata),
@@ -1498,7 +1500,7 @@ export class ReviewWorker {
         { signal }
       );
       await ensureNotCanceled(signal, checkCancellation);
-      await this.recordEvent(context, "info", "codex_finished", "Codex review finished.", {
+      await this.recordEvent(context, "info", "codex_finished", "AI review finished.", {
         hasFindings: result.hasFindings,
         responseBytes: Buffer.byteLength(result.raw, "utf8"),
         assessment: result.structured.assessment,
@@ -1508,7 +1510,7 @@ export class ReviewWorker {
         await ensureNotCanceled(signal, checkCancellation);
         const comment = await publishCommitReviewNote(client, gitlabProjectId, commit.id, result.markdown, commit.web_url);
         await this.state.finishCommitNoFindings(runId, result.markdown, comment, result.structured);
-        await this.recordEvent(context, "info", "no_findings", "Codex completed with no actionable findings; summary comment was posted to GitLab.");
+        await this.recordEvent(context, "info", "no_findings", "AI review completed with no actionable findings; summary comment was posted to GitLab.");
         await this.recordEvent(context, "info", "comment_posted", "GitLab commit review summary comment posted.", {
           commentId: comment.id,
           skippedExistingComment: comment.skipped
@@ -1603,7 +1605,7 @@ export class ReviewWorker {
       );
       const selectedStrategy = reviewStrategyOverride ?? gitlabProject.reviewStrategy;
       const { runtimeSettings, resolution } = await this.resolveRuntimeSettings(context, selectedStrategy, reviewInput, formatted, reviewableDiffs, signal);
-      await this.recordEvent(context, "info", "codex_started", "Codex review started.", codexStartMetadata(runtimeSettings, resolution, this.config.codexSandboxMode));
+      await this.recordEvent(context, "info", "codex_started", "AI review started.", codexStartMetadata(runtimeSettings, resolution, this.config.codexSandboxMode));
       const result = await this.reviewer.review(
         reviewInput,
         (event) => this.recordEvent(context, event.level, event.step, event.message, event.metadata),
@@ -1611,7 +1613,7 @@ export class ReviewWorker {
         { signal }
       );
       await ensureNotCanceled(signal, checkCancellation);
-      await this.recordEvent(context, "info", "codex_finished", "Codex review finished.", {
+      await this.recordEvent(context, "info", "codex_finished", "AI review finished.", {
         hasFindings: result.hasFindings,
         responseBytes: Buffer.byteLength(result.raw, "utf8"),
         assessment: result.structured.assessment,
@@ -1621,7 +1623,7 @@ export class ReviewWorker {
         await ensureNotCanceled(signal, checkCancellation);
         const comment = await publishCommitReviewNote(client, gitlabProject.gitlabProjectId, commit.id, result.markdown, commit.web_url);
         await this.state.finishCommitNoFindings(runId, result.markdown, comment, result.structured);
-        await this.recordEvent(context, "info", "no_findings", "Codex completed with no actionable findings; summary comment was posted to GitLab.");
+        await this.recordEvent(context, "info", "no_findings", "AI review completed with no actionable findings; summary comment was posted to GitLab.");
         await this.recordEvent(context, "info", "comment_posted", "GitLab commit review summary comment posted.", {
           commentId: comment.id,
           skippedExistingComment: comment.skipped
@@ -1791,19 +1793,21 @@ export class ReviewWorker {
     signal?: AbortSignal
   ): Promise<{ runtimeSettings: CodexReviewRuntimeSettings; resolution: ReviewStrategyResolution }> {
     throwIfCanceled(signal);
-    const modelSettings = await this.reviewSettings.getEffectiveReviewSettings();
+    const modelSettings = await this.reviewSettings.getEffectiveRuntimeSettings();
 
     if (strategy !== "auto") {
       const resolution = resolveFixedReviewStrategy(strategy);
-      const settings = runtimeSettings(modelSettings.model, resolution.effectiveReasoningEffort);
+      const settings = runtimeSettings(modelSettings, resolution.effectiveReasoningEffort);
       await this.recordEvent(context, "info", "review_strategy_selected", "Review strategy selected.", {
         ...strategyMetadata(settings, resolution)
       });
       return { runtimeSettings: settings, resolution };
     }
 
-    await this.recordEvent(context, "info", "codex_triage_started", "Codex triage started for auto review strategy.", {
+    await this.recordEvent(context, "info", "codex_triage_started", "AI triage started for auto review strategy.", {
       model: modelSettings.model,
+      provider: modelSettings.provider,
+      providerLabel: modelSettings.providerLabel,
       modelReasoningEffort: "medium",
       sandboxMode: this.config.codexSandboxMode,
       reviewStrategy: strategy,
@@ -1833,8 +1837,8 @@ export class ReviewWorker {
         triageReason: triage.reason,
         triageRiskSignals: triage.riskSignals
       };
-      const settings = runtimeSettings(modelSettings.model, resolution.effectiveReasoningEffort);
-      await this.recordEvent(context, "info", "codex_triage_finished", "Codex triage selected review effort.", {
+      const settings = runtimeSettings(modelSettings, resolution.effectiveReasoningEffort);
+      await this.recordEvent(context, "info", "codex_triage_finished", "AI triage selected review effort.", {
         ...strategyMetadata(settings, resolution),
         inputTokens: triage.usage?.input_tokens ?? null,
         outputTokens: triage.usage?.output_tokens ?? null,
@@ -1855,8 +1859,8 @@ export class ReviewWorker {
         triageReason: `Triage failed; using high as safe fallback. ${errorMessage(error)}`,
         triageRiskSignals: []
       };
-      const settings = runtimeSettings(modelSettings.model, resolution.effectiveReasoningEffort);
-      await this.recordEvent(context, "warn", "codex_triage_failed", "Codex triage failed; falling back to high.", {
+      const settings = runtimeSettings(modelSettings, resolution.effectiveReasoningEffort);
+      await this.recordEvent(context, "warn", "codex_triage_failed", "AI triage failed; falling back to high.", {
         error: errorMessage(error),
         ...strategyMetadata(settings, resolution)
       });
@@ -2076,6 +2080,8 @@ function codexStartMetadata(
   return {
     promptVersion: REVIEW_PROMPT_VERSION,
     model: settings.model,
+    provider: settings.provider,
+    providerLabel: settings.providerLabel,
     modelReasoningEffort: settings.reasoningEffort,
     sandboxMode,
     ...strategyMetadata(settings, resolution)
@@ -2085,6 +2091,8 @@ function codexStartMetadata(
 function strategyMetadata(settings: CodexReviewRuntimeSettings, resolution: ReviewStrategyResolution): Record<string, unknown> {
   return {
     model: settings.model,
+    provider: settings.provider,
+    providerLabel: settings.providerLabel,
     modelReasoningEffort: settings.reasoningEffort,
     reviewStrategy: resolution.configuredStrategy,
     effectiveReasoningEffort: resolution.effectiveReasoningEffort,

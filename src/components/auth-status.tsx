@@ -11,6 +11,7 @@ export function AuthStatusPanel() {
   const codex = useQuery({ queryKey: ["codex-status"], queryFn: () => apiGet<CodexStatus>("/api/codex/status"), retry: false });
   const reviewerBot = useQuery({ queryKey: ["reviewer-bot-status"], queryFn: () => apiGet<ReviewerBotStatus>("/api/reviewer-bot/status") });
   const isAdmin = auth.data?.currentUser?.role === "admin";
+  const usesCodexAccount = codex.data?.reviewProvider !== "openai_compatible";
   const codexAccountDetail = codex.data?.authenticated
     ? `인스턴스 공용 ${codex.data.planType ?? "Codex 계정"}`
     : codex.data?.error ?? "인스턴스 공용 ChatGPT 로그인이 필요합니다";
@@ -105,14 +106,17 @@ export function AuthStatusPanel() {
           <KeyRound size={20} />
         </div>
         <div>
-          <span className="eyebrow">Codex</span>
-          <strong>{codex.data?.authenticated ? (isAdmin ? codex.data.email ?? "연결됨" : "연결됨") : "연결되지 않음"}</strong>
-          {isAdmin && <p>{codexAccountDetail}</p>}
+          <span className="eyebrow">AI Review</span>
+          <strong>{codex.data?.reviewProviderLabel ?? "Codex 계정"}</strong>
+          {isAdmin && usesCodexAccount && <p>{codexAccountDetail}</p>}
+          {isAdmin && !usesCodexAccount && (
+            <p>마지막 검증: {codex.data?.compatibleLastVerifiedAt ? new Date(codex.data.compatibleLastVerifiedAt).toLocaleString() : "없음"}</p>
+          )}
           <div className="review-meta-summary auth-meta">
             <span>{codex.data?.reviewModel ?? "gpt-5.5"}</span>
             <span>프로젝트별 전략</span>
           </div>
-          {isAdmin && deviceLogin && !codex.data?.authenticated && (
+          {isAdmin && usesCodexAccount && deviceLogin && !codex.data?.authenticated && (
             <div className="device-login-card">
               <span>Codex device code</span>
               <strong>{deviceLogin.userCode}</strong>
@@ -133,23 +137,25 @@ export function AuthStatusPanel() {
         </div>
         {isAdmin && (
           <div className="button-row">
-            <button className="icon-button" onClick={() => codex.refetch()} title="Codex 상태 새로고침">
+            <button className="icon-button" onClick={() => codex.refetch()} title="AI 상태 새로고침">
               <RefreshCw size={16} />
             </button>
-            {codex.data?.authenticated ? (
-              <button
-                className="icon-button danger"
-                onClick={() => disconnectCodex.mutate()}
-                disabled={disconnectCodex.isPending}
-                title="Codex 연결 해제"
-              >
-                <LogOut size={16} />
-              </button>
-            ) : (
-              <button className="button" onClick={() => startCodexLogin.mutate()} disabled={startCodexLogin.isPending}>
-                <ExternalLink size={16} />
-                연결
-              </button>
+            {usesCodexAccount && (
+              codex.data?.authenticated ? (
+                <button
+                  className="icon-button danger"
+                  onClick={() => disconnectCodex.mutate()}
+                  disabled={disconnectCodex.isPending}
+                  title="Codex 연결 해제"
+                >
+                  <LogOut size={16} />
+                </button>
+              ) : (
+                <button className="button" onClick={() => startCodexLogin.mutate()} disabled={startCodexLogin.isPending}>
+                  <ExternalLink size={16} />
+                  연결
+                </button>
+              )
             )}
           </div>
         )}

@@ -17,8 +17,11 @@ export type CodexStatus = {
   authMode: string | null;
   email: string | null;
   planType: string | null;
+  reviewProvider: "codex" | "openai_compatible";
+  reviewProviderLabel: string;
   reviewModel: string;
   reviewStrategyMode: "project";
+  compatibleLastVerifiedAt: string | null;
   managedByAdmin?: boolean;
   error?: string;
 };
@@ -37,12 +40,24 @@ export type ReviewerBotStatus = {
 };
 
 export type CodexReviewSettings = {
+  provider: "codex" | "openai_compatible";
+  providerLabel: string;
   model: string;
+  codexModel: string;
+  compatible: {
+    baseUrl: string | null;
+    model: string | null;
+    contextWindow: number | null;
+    apiKeyConfigured: boolean;
+    lastVerifiedAt: string | null;
+  };
   isDefault: boolean;
   updatedByUserId: number | null;
   updatedAt: string | null;
   defaults: {
-    model: string;
+    provider: "codex";
+    codexModel: string;
+    compatibleContextWindow: number;
   };
   modelPresets: string[];
   strategyMode: "project";
@@ -127,6 +142,8 @@ export type StructuredReview = {
 };
 
 export type ReviewMeta = {
+  provider: string | null;
+  providerLabel: string | null;
   model: string | null;
   reasoningEffort: string | null;
   promptVersion: string | null;

@@ -45,8 +45,8 @@ GITLAB_OAUTH_CLIENT_SECRET=<optional secret>
 
 - 첫 로그인 사용자는 앱 내부 `admin` 역할을 받습니다.
 - 이후 로그인한 사용자는 기본 `user` 역할입니다.
-- `admin`은 Settings에서 사용자 역할, Codex 연결, Reviewer Bot Token을 관리합니다.
-- `user`는 자기 project와 review run을 관리하고 Codex 연결 상태를 확인합니다.
+- `admin`은 Settings에서 사용자 역할, AI provider, Reviewer Bot Token을 관리합니다.
+- `user`는 자기 project와 review run을 관리하고 활성 AI provider 상태를 확인합니다.
 - 마지막 남은 `admin`은 `user`로 바꿀 수 없습니다.
 
 사용자 OAuth token은 로그인, project 검색, branch 조회, 사용자별 project subscription 관리에 사용됩니다. 실제 리뷰 실행과 GitLab 댓글 작성은 Reviewer Bot Token으로 수행합니다.

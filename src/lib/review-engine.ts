@@ -1,10 +1,12 @@
-import { Codex, type SandboxMode, type ThreadEvent, type ThreadItem, type Usage } from "@openai/codex-sdk";
+import type { SandboxMode, ThreadEvent, ThreadItem, Usage } from "@openai/codex-sdk";
 import {
   DEFAULT_CODEX_REVIEW_MODEL,
   DEFAULT_CODEX_REVIEW_REASONING_EFFORT,
+  defaultRuntimeSettings,
   type CodexReviewReasoningEffort,
   type CodexReviewRuntimeSettings
 } from "./codex-review-settings";
+import { createCodexRuntime } from "./codex-runtime";
 import {
   REVIEW_OUTPUT_SCHEMA,
   buildReviewPrompt,
@@ -62,13 +64,15 @@ export class CodexReviewEngine implements Reviewer {
     settings?: CodexReviewRuntimeSettings,
     options: { signal?: AbortSignal } = {}
   ): Promise<ReviewResult> {
-    const codex = new Codex({
-      ...(this.options.codexBin ? { codexPathOverride: this.options.codexBin } : {}),
-      env: codexEnv(this.options.codexHome)
-    });
+    const runtime = settings ?? {
+      ...defaultRuntimeSettings(),
+      model: this.options.model ?? REVIEW_MODEL,
+      reasoningEffort: this.options.modelReasoningEffort ?? REVIEW_REASONING_EFFORT
+    };
+    const codex = createCodexRuntime(this.options, runtime);
     const thread = codex.startThread({
-      model: settings?.model ?? this.options.model ?? REVIEW_MODEL,
-      modelReasoningEffort: settings?.reasoningEffort ?? this.options.modelReasoningEffort ?? REVIEW_REASONING_EFFORT,
+      model: runtime.model,
+      modelReasoningEffort: runtime.reasoningEffort,
       ...(input.workingDirectory ? { workingDirectory: input.workingDirectory } : {}),
       skipGitRepoCheck: true,
       sandboxMode: this.options.sandboxMode ?? "read-only",
@@ -82,7 +86,7 @@ export class CodexReviewEngine implements Reviewer {
     });
     const { finalResponse, usage } = await collectReviewEvents(events, onEvent);
     const raw = finalResponse.trim();
-    if (!raw) throw new Error("Codex review response was empty");
+    if (!raw) throw new Error("AI review response was empty");
 
     const structured = parseStructuredReview(raw);
     const markdown = renderReviewMarkdown(structured);
@@ -90,27 +94,31 @@ export class CodexReviewEngine implements Reviewer {
     await emit(onEvent, {
       level: "info",
       step: "codex_message",
-      message: "Codex produced final review response.",
+      message: "AI provider produced final review response.",
       metadata: {
         responseBytes: Buffer.byteLength(raw, "utf8"),
         markdownPreview: truncateText(markdown, MARKDOWN_PREVIEW_CHARS).text,
         markdownPreviewTruncated: truncateText(markdown, MARKDOWN_PREVIEW_CHARS).truncated,
         assessment: structured.assessment,
         issueCount: structured.criticalIssues.length + structured.potentialIssues.length,
-        hasFindings
+        hasFindings,
+        provider: runtime.provider,
+        providerLabel: runtime.providerLabel
       }
     });
     if (usage) {
       await emit(onEvent, {
         level: "info",
         step: "codex_usage",
-        message: "Codex turn usage recorded.",
+        message: "AI provider turn usage recorded.",
         metadata: {
           inputTokens: usage.input_tokens,
           cachedInputTokens: usage.cached_input_tokens,
           outputTokens: usage.output_tokens,
           reasoningOutputTokens: usage.reasoning_output_tokens,
-          totalTokens: usage.input_tokens + usage.output_tokens
+          totalTokens: usage.input_tokens + usage.output_tokens,
+          provider: runtime.provider,
+          providerLabel: runtime.providerLabel
         }
       });
     }
@@ -149,7 +157,7 @@ async function collectReviewEvents(
         await emit(onEvent, {
           level: "error",
           step: "codex_failed",
-          message: "Codex turn failed.",
+          message: "AI provider turn failed.",
           metadata: { error: event.error.message }
         });
         break;
@@ -158,7 +166,7 @@ async function collectReviewEvents(
         await emit(onEvent, {
           level: "error",
           step: "codex_failed",
-          message: "Codex stream failed.",
+          message: "AI provider stream failed.",
           metadata: { error: event.message }
         });
         break;
@@ -175,7 +183,7 @@ async function emitToolEvent(onEvent: ((event: ReviewEngineEvent) => Promise<voi
     await emit(onEvent, {
       level: item.status === "failed" ? "warn" : "info",
       step: "codex_tool_used",
-      message: "Codex executed a shell command for repository inspection.",
+      message: "AI provider executed a shell command for repository inspection.",
       metadata: {
         tool: "command_execution",
         command: sanitizeCommand(item.command),
@@ -193,7 +201,7 @@ async function emitToolEvent(onEvent: ((event: ReviewEngineEvent) => Promise<voi
     await emit(onEvent, {
       level: item.status === "failed" ? "warn" : "info",
       step: "codex_tool_used",
-      message: "Codex used an MCP tool.",
+      message: "AI provider used an MCP tool.",
       metadata: {
         tool: item.tool,
         server: item.server,
@@ -208,7 +216,7 @@ async function emitToolEvent(onEvent: ((event: ReviewEngineEvent) => Promise<voi
     await emit(onEvent, {
       level: "info",
       step: "codex_tool_used",
-      message: "Codex requested web search.",
+      message: "AI provider requested web search.",
       metadata: { tool: "web_search", query: sanitizeCommand(item.query) }
     });
     return;
@@ -218,7 +226,7 @@ async function emitToolEvent(onEvent: ((event: ReviewEngineEvent) => Promise<voi
     await emit(onEvent, {
       level: "warn",
       step: "codex_tool_used",
-      message: "Codex attempted a file change in read-only review.",
+      message: "AI provider attempted a file change in read-only review.",
       metadata: {
         tool: "file_change",
         status: item.status,
@@ -254,13 +262,4 @@ function redactSensitive(value: string): string {
   return value
     .replace(/(Authorization:\s*)(Basic|Bearer)\s+[A-Za-z0-9+/=._-]+/gi, "$1<redacted>")
     .replace(/(PRIVATE-TOKEN[=:\s]+)[A-Za-z0-9._-]+/gi, "$1<redacted>");
-}
-
-function codexEnv(codexHome?: string): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value !== undefined) env[key] = value;
-  }
-  if (codexHome) env.CODEX_HOME = codexHome;
-  return env;
 }

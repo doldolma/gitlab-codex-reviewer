@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CodexReleaseNoteEngine, type ReleaseNoteEngineEvent } from "../lib/release-note-engine";
 import { RELEASE_NOTE_OUTPUT_SCHEMA } from "../lib/release-note-prompts";
+import { defaultModelSettings, runtimeSettings } from "../lib/codex-review-settings";
 
 const codexMocks = vi.hoisted(() => {
   const runStreamed = vi.fn();
@@ -43,7 +44,7 @@ describe("CodexReleaseNoteEngine", () => {
       (event) => {
         captured.push(event);
       },
-      { model: "gpt-5.5", reasoningEffort: "xhigh" }
+      runtimeSettings(defaultModelSettings(), "xhigh")
     );
 
     expect(codexMocks.Codex).toHaveBeenCalledWith(

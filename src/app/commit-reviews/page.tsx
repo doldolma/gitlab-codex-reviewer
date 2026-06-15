@@ -170,7 +170,7 @@ export default function CommitReviewsPage() {
                   <th>브랜치</th>
                   <th>실행 방식</th>
                   <th>상태</th>
-                  <th>Codex</th>
+                  <th>AI</th>
                   <th>리뷰 완료</th>
                   <th />
                 </tr>

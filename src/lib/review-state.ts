@@ -199,6 +199,8 @@ export type ReviewJobKind =
 export type ReviewJobStatus = "queued" | "running" | "completed" | "failed" | "canceled";
 
 export type ReviewMeta = {
+  provider: string | null;
+  providerLabel: string | null;
   model: string | null;
   reasoningEffort: string | null;
   promptVersion: string | null;
@@ -2039,6 +2041,8 @@ export class ReviewStateStore {
       const metadata = parseJsonRecord(row.metadataJson);
       const current = byRun.get(row.runId) ?? emptyReviewMeta();
       if (row.step === "codex_started") {
+        current.provider = stringFromMetadata(metadata, "provider") ?? "codex";
+        current.providerLabel = stringFromMetadata(metadata, "providerLabel") ?? "Codex 계정";
         current.model = stringFromMetadata(metadata, "model");
         current.reasoningEffort = stringFromMetadata(metadata, "modelReasoningEffort");
         current.promptVersion = stringFromMetadata(metadata, "promptVersion");
@@ -2434,6 +2438,8 @@ function gitlabProjectRefIdFromJob(job: ReviewJob): number {
 
 function emptyReviewMeta(): ReviewMeta {
   return {
+    provider: null,
+    providerLabel: null,
     model: null,
     reasoningEffort: null,
     promptVersion: null,

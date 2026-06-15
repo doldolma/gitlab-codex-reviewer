@@ -1,9 +1,10 @@
-import { Codex, type SandboxMode, type ThreadEvent, type Usage } from "@openai/codex-sdk";
+import type { SandboxMode, ThreadEvent, Usage } from "@openai/codex-sdk";
 import {
   TRIAGE_CODEX_REVIEW_REASONING_EFFORT,
   type CodexReviewModelSettings,
   type CodexReviewReasoningEffort
 } from "./codex-review-settings";
+import { createCodexRuntime } from "./codex-runtime";
 import type { ReviewPromptInput } from "./prompts";
 import { REVIEW_PROMPT_VERSION } from "./prompts";
 import type { ReviewRiskLevel } from "./review-strategy";
@@ -50,10 +51,7 @@ export class CodexReviewTriageEngine implements ReviewTriageRunner {
   constructor(private readonly options: CodexReviewTriageEngineOptions = {}) {}
 
   async triage(input: ReviewTriageInput, settings: CodexReviewModelSettings, options: { signal?: AbortSignal } = {}): Promise<ReviewTriageResult> {
-    const codex = new Codex({
-      ...(this.options.codexBin ? { codexPathOverride: this.options.codexBin } : {}),
-      env: codexEnv(this.options.codexHome)
-    });
+    const codex = createCodexRuntime(this.options, settings);
     const thread = codex.startThread({
       model: settings.model,
       modelReasoningEffort: TRIAGE_CODEX_REVIEW_REASONING_EFFORT,
@@ -69,7 +67,7 @@ export class CodexReviewTriageEngine implements ReviewTriageRunner {
     });
     const { finalResponse, usage } = await collectFinalResponse(events);
     const raw = finalResponse.trim();
-    if (!raw) throw new Error("Codex triage response was empty");
+    if (!raw) throw new Error("AI triage response was empty");
 
     return {
       ...parseTriageResult(raw),
@@ -145,7 +143,7 @@ async function collectFinalResponse(events: AsyncGenerator<ThreadEvent>): Promis
 
 function parseTriageResult(raw: string): Omit<ReviewTriageResult, "raw" | "usage"> {
   const parsed = JSON.parse(stripJsonFence(raw)) as unknown;
-  if (!isRecord(parsed)) throw new Error("Codex triage response was not a JSON object");
+  if (!isRecord(parsed)) throw new Error("AI triage response was not a JSON object");
   return {
     recommendedReasoningEffort: parseTriageReasoning(parsed.recommendedReasoningEffort),
     riskLevel: parseRiskLevel(parsed.riskLevel),
@@ -156,21 +154,21 @@ function parseTriageResult(raw: string): Omit<ReviewTriageResult, "raw" | "usage
 
 function parseTriageReasoning(value: unknown): Extract<CodexReviewReasoningEffort, "medium" | "high" | "xhigh"> {
   if (value === "medium" || value === "high" || value === "xhigh") return value;
-  throw new Error("Codex triage response has invalid recommendedReasoningEffort");
+  throw new Error("AI triage response has invalid recommendedReasoningEffort");
 }
 
 function parseRiskLevel(value: unknown): ReviewRiskLevel {
   if (value === "low" || value === "medium" || value === "high") return value;
-  throw new Error("Codex triage response has invalid riskLevel");
+  throw new Error("AI triage response has invalid riskLevel");
 }
 
 function parseStringArray(value: unknown, field: string): string[] {
-  if (!Array.isArray(value)) throw new Error(`Codex triage response has invalid ${field}`);
+  if (!Array.isArray(value)) throw new Error(`AI triage response has invalid ${field}`);
   return value.map((item) => parseString(item, field));
 }
 
 function parseString(value: unknown, field: string): string {
-  if (typeof value !== "string") throw new Error(`Codex triage response has invalid ${field}`);
+  if (typeof value !== "string") throw new Error(`AI triage response has invalid ${field}`);
   return value;
 }
 
@@ -180,13 +178,4 @@ function stripJsonFence(raw: string): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
-}
-
-function codexEnv(codexHome?: string): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value !== undefined) env[key] = value;
-  }
-  if (codexHome) env.CODEX_HOME = codexHome;
-  return env;
 }
