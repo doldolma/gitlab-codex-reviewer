@@ -16,6 +16,7 @@ import { CodexReleaseNoteEngine, OpenAICompatibleReleaseNoteEngine } from "./rel
 import { OpenAICompatibleConnectionVerifier } from "./openai-compatible-verifier";
 import { OpenAICompatibleReviewEngine } from "./openai-compatible-review-engine";
 import { ProviderReleaseNoteWriter, ProviderReviewer, ProviderTriageRunner } from "./provider-reviewer";
+import { CodexReplier, OpenAICompatibleReplier, ProviderReplier } from "./comment-reply";
 
 export const config = loadConfig();
 process.env.CODEX_HOME = config.codexHome;
@@ -56,6 +57,10 @@ export const releaseNoteEngine = new ProviderReleaseNoteWriter(
   codexReleaseNoteEngine,
   new OpenAICompatibleReleaseNoteEngine(webToolsConfig)
 );
+export const commentReplier = new ProviderReplier(
+  new CodexReplier({ codexBin: config.codexBin, codexHome: config.codexHome, sandboxMode: config.codexSandboxMode }),
+  new OpenAICompatibleReplier(webToolsConfig)
+);
 export const reviewWorker = new ReviewWorker(
   config,
   gitlabOAuth,
@@ -65,5 +70,6 @@ export const reviewWorker = new ReviewWorker(
   reviewTriageEngine,
   codexReviewSettings,
   undefined,
-  releaseNoteEngine
+  releaseNoteEngine,
+  commentReplier
 );

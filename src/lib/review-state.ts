@@ -195,7 +195,8 @@ export type ReviewJobKind =
   | "commit_webhook"
   | "mr_webhook"
   | "release_note_webhook"
-  | "release_note_manual";
+  | "release_note_manual"
+  | "mr_comment_reply";
 export type ReviewJobStatus = "queued" | "running" | "completed" | "failed" | "canceled";
 
 export type ReviewMeta = {

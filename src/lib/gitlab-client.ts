@@ -38,6 +38,8 @@ export type GitLabNote = {
   id: number;
   body: string;
   web_url?: string;
+  system?: boolean;
+  author?: { id?: number; username?: string };
 };
 
 export type GitLabCommit = {
@@ -217,6 +219,17 @@ export class GitLabClient {
     });
   }
 
+  async createMergeRequestDiscussionNote(projectId: string, mrIid: number, discussionId: string, body: string): Promise<GitLabNote> {
+    return this.request<GitLabNote>(
+      `/api/v4/projects/${encodeProjectId(projectId)}/merge_requests/${mrIid}/discussions/${encodeURIComponent(discussionId)}/notes`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ body })
+      }
+    );
+  }
+
   async listMergeRequestDiscussions(projectId: string, mrIid: number): Promise<GitLabDiscussion[]> {
     return this.paginate<GitLabDiscussion>(`/api/v4/projects/${encodeProjectId(projectId)}/merge_requests/${mrIid}/discussions`, {
       per_page: "100"
@@ -387,6 +400,7 @@ export class GitLabClient {
       push_events: true,
       tag_push_events: true,
       merge_requests_events: true,
+      note_events: true,
       enable_ssl_verification: true,
       ...(input.name ? { name: input.name } : {})
     };

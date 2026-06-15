@@ -17,6 +17,7 @@ import type { ReviewerBotService } from "../lib/reviewer-bot";
 import { defaultPathFilters, filterChangedFiles, matchReviewInstructions, type ProjectReviewConfig } from "../lib/review-config";
 import { parseReviewStrategy, resolveFixedReviewStrategy, type ReviewStrategy, type ReviewStrategyResolution } from "../lib/review-strategy";
 import { CodexReviewTriageEngine, type ReviewTriageRunner } from "../lib/review-triage";
+import { CodexReplier, OpenAICompatibleReplier, ProviderReplier, type Replier } from "../lib/comment-reply";
 import {
   ReviewStateStore,
   type CommitReviewRunView,
@@ -88,7 +89,8 @@ export class ReviewWorker {
       }
     },
     private readonly toolRunner: ReadonlyToolRunner = new ReadonlyToolRunner(),
-    private readonly releaseNoteWriter: ReleaseNoteWriter = new CodexReleaseNoteEngine()
+    private readonly releaseNoteWriter: ReleaseNoteWriter = new CodexReleaseNoteEngine(),
+    private readonly replier: Replier = new ProviderReplier(new CodexReplier(), new OpenAICompatibleReplier())
   ) {
     this.workspace = new GitWorkspaceManager(config);
   }
@@ -481,6 +483,8 @@ export class ReviewWorker {
       case "release_note_webhook":
       case "release_note_manual":
         return this.executeReleaseNoteJob(job, signal, checkCancellation);
+      case "mr_comment_reply":
+        return this.executeCommentReplyJob(job, signal, checkCancellation);
       case "scan_user":
         await ensureNotCanceled(signal, checkCancellation);
         await this.scanOnce();
@@ -488,6 +492,52 @@ export class ReviewWorker {
       default:
         throw new Error(`Unknown review job kind: ${job.kind}`);
     }
+  }
+
+  private async executeCommentReplyJob(
+    job: ReviewJobView,
+    signal?: AbortSignal,
+    checkCancellation?: CancellationCheck
+  ): Promise<"processed" | "deferred"> {
+    await ensureNotCanceled(signal, checkCancellation);
+    const gitlabProjectId = stringFromPayload(job.payload, "gitlabProjectId");
+    const mrIid = numberFromPayload(job.payload, "mrIid");
+    const discussionId = stringFromPayload(job.payload, "discussionId");
+    const question = stringFromPayload(job.payload, "question");
+    if (!gitlabProjectId || !mrIid || !discussionId || !question) {
+      throw new Error("mr_comment_reply job payload is incomplete");
+    }
+
+    const botConnection = await this.reviewerBot.getConnection();
+    if (!botConnection) throw new Error("Reviewer bot token is not connected");
+    const client = new GitLabClient(botConnection);
+
+    const [mr, diffs, discussions] = await Promise.all([
+      client.getMergeRequest(gitlabProjectId, mrIid),
+      client.listMergeRequestDiffs(gitlabProjectId, mrIid),
+      client.listMergeRequestDiscussions(gitlabProjectId, mrIid)
+    ]);
+    await ensureNotCanceled(signal, checkCancellation);
+
+    const thread = discussions.find((discussion) => discussion.id === discussionId);
+    const threadText = (thread?.notes ?? [])
+      .filter((note) => !note.system)
+      .map((note) => `${note.author?.username ?? "user"}: ${note.body}`)
+      .join("\n\n");
+    const diffText = formatDiffForReview(gitlabProjectId, mr, diffs, this.config.maxDiffBytes).text;
+
+    const modelSettings = await this.reviewSettings.getEffectiveRuntimeSettings();
+    const settings = runtimeSettings(modelSettings, "medium");
+    const result = await this.replier.reply(
+      { mrTitle: mr.title ?? `Merge request !${mrIid}`, question, threadText, diffText },
+      settings,
+      { signal }
+    );
+    await ensureNotCanceled(signal, checkCancellation);
+
+    await client.createMergeRequestDiscussionNote(gitlabProjectId, mrIid, discussionId, result.text);
+    console.log(`[worker] [review] Posted MR comment reply: project=${gitlabProjectId}, mr=${mrIid}, discussion=${discussionId}`);
+    return "processed";
   }
 
   private async withProjectJobLock(

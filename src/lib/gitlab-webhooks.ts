@@ -45,6 +45,20 @@ type MergeRequestPayload = {
   user?: { username?: string };
 };
 
+type NotePayload = {
+  object_kind?: string;
+  event_type?: string;
+  project?: { id?: number };
+  user?: { username?: string };
+  object_attributes?: {
+    id?: number;
+    note?: string;
+    noteable_type?: string;
+    discussion_id?: string;
+  };
+  merge_request?: { iid?: number; title?: string };
+};
+
 export class GitLabWebhookService {
   constructor(
     private readonly config: AppConfig,
@@ -155,8 +169,49 @@ export class GitLabWebhookService {
     if (eventName === "Merge Request Hook") {
       return this.handleMergeRequest(group, payload as MergeRequestPayload);
     }
+    if (eventName === "Note Hook") {
+      return this.handleNote(group, payload as NotePayload);
+    }
 
     return { accepted: true, queued: 0, skipped: 1, reason: `Unsupported webhook event: ${eventName}` };
+  }
+
+  private async handleNote(group: SharedProjectGroup, payload: NotePayload): Promise<WebhookHandleResult> {
+    const attrs = payload.object_attributes;
+    if (attrs?.noteable_type !== "MergeRequest") {
+      return { accepted: true, queued: 0, skipped: 1, reason: `Note is not on a merge request: ${attrs?.noteable_type ?? "unknown"}` };
+    }
+    const mrIid = payload.merge_request?.iid;
+    const discussionId = attrs?.discussion_id;
+    const note = attrs?.note;
+    if (!mrIid || !discussionId || !note) {
+      return { accepted: true, queued: 0, skipped: 1, reason: "Note payload is missing iid, discussion id, or body" };
+    }
+
+    const bot = await this.reviewerBot.status();
+    if (!bot.username) return { accepted: true, queued: 0, skipped: 1, reason: "Reviewer bot is not connected" };
+
+    const author = payload.user?.username ?? null;
+    if (author && author === bot.username) {
+      return { accepted: true, queued: 0, skipped: 1, reason: "Ignoring the reviewer bot's own comment" };
+    }
+    if (!mentionsBot(note, bot.username)) {
+      return { accepted: true, queued: 0, skipped: 1, reason: "Comment does not mention the reviewer bot" };
+    }
+
+    await this.state.createReviewJob({
+      kind: "mr_comment_reply",
+      userId: group.representative.userId,
+      payload: {
+        gitlabProjectRefId: group.gitlabProject.id,
+        gitlabProjectId: group.gitlabProject.gitlabProjectId,
+        mrIid,
+        discussionId,
+        question: note,
+        authorUsername: author
+      }
+    });
+    return { accepted: true, queued: 1, skipped: 0 };
   }
 
   private async handlePush(group: SharedProjectGroup, payload: PushPayload): Promise<WebhookHandleResult> {
@@ -391,6 +446,17 @@ function shouldSkipGroup(group: SharedProjectGroup, mr: GitLabMergeRequest): boo
   if (mr.draft || mr.work_in_progress) return true;
   const skipLabels = new Set(group.skipLabels.map((label) => label.toLowerCase()));
   return (mr.labels ?? []).some((label) => skipLabels.has(label.toLowerCase()));
+}
+
+export function mentionsBot(note: string, botUsername: string): boolean {
+  // Match @username not immediately followed by another username character, so
+  // "@reviewer-bot." matches but "@reviewer-bot2" does not. A trailing dot is
+  // treated as a boundary (sentence punctuation) rather than part of the name.
+  return new RegExp(`@${escapeRegExp(botUsername)}(?![A-Za-z0-9_\\-])`, "i").test(note);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
