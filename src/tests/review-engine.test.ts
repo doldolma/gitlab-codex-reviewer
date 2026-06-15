@@ -263,6 +263,26 @@ describe("CodexReviewEngine", () => {
     expect(prompt).toContain("인증과 입력 검증");
     expect(prompt).toContain("Tool Findings");
     expect(prompt).toContain("Review profile: assertive");
+    expect(prompt).toContain("Be assertive and thorough");
+    expect(prompt).not.toContain("Be conservative and high-precision");
+  });
+
+  it("switches the system style instruction for the chill profile", () => {
+    const base = {
+      kind: "merge_request" as const,
+      repoName: "group/service",
+      sha: "abc123",
+      diffText: "diff --git a/src/app.ts b/src/app.ts"
+    };
+    const chill = buildReviewPrompt({ ...base, reviewProfile: "chill" });
+    const assertive = buildReviewPrompt({ ...base, reviewProfile: "assertive" });
+
+    expect(chill).toContain("Be conservative and high-precision");
+    expect(chill).toContain("Review profile: chill");
+    expect(chill).not.toContain("Be assertive and thorough");
+
+    expect(assertive).toContain("Be assertive and thorough");
+    expect(assertive).not.toContain("Be conservative and high-precision");
   });
 
   it("treats only critical or potential issues as postable findings", () => {

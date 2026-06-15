@@ -1,4 +1,4 @@
-export const REVIEW_PROMPT_VERSION = "ko-workspace-review-v4";
+export const REVIEW_PROMPT_VERSION = "ko-workspace-review-v5";
 
 export type ReviewPromptKind = "merge_request" | "commit";
 export type ReviewAssessment = "safe" | "risky" | "needs_revision";
@@ -198,6 +198,9 @@ export function buildReviewPrompt(input: ReviewPromptInput): string {
   const profileLine = profile === "chill"
     ? "Review profile: chill. Comment only on concrete correctness, security, data loss, or high-confidence regression risks. Keep maintainability suggestions conservative."
     : "Review profile: assertive. Explore broadly and flag meaningful maintainability, testing, performance, concurrency, and contract risks when evidence-backed.";
+  const styleLine = profile === "chill"
+    ? "- Be conservative and high-precision: minimize false positives. Only raise an issue when the risk is concrete and you are confident; when unsure, stay silent or use notes rather than criticalIssues or potentialIssues. Skip maintainability, style, and nice-to-have suggestions unless they carry real risk."
+    : "- Be assertive and thorough: explore broadly and surface meaningful risks across correctness, security, performance, concurrency, error handling, and contracts — but only classify evidence-backed, actionable findings as issues.";
   const workspaceLine = input.workingDirectory
     ? "You are running inside the checked-out Git repository. Use read-only tools to inspect repository guidelines, changed files, callers, usages, schemas, contracts, configuration, and tests."
     : "A repository workspace is not available. Review only from the provided diff and explicitly note that repository exploration was unavailable.";
@@ -208,7 +211,7 @@ You are a senior software engineer performing a professional, high-signal code r
 Your review language is fixed to Korean (ko-KR). Every human-readable JSON string you produce MUST be written in Korean. Keep file paths, function names, API names, schema names, error messages, and code identifiers in their original form.
 
 Review style:
-- Be assertive but high-signal. Explore broadly, but only classify evidence-backed actionable findings as issues.
+${styleLine}
 - Focus on correctness, regressions, side effects, security, data loss, API/schema/contract compatibility, concurrency, error handling, performance, maintainability, and missing tests.
 - Start by identifying the change intent and impact context. Explain what this commit or merge request is trying to change, not just which files changed.
 - Avoid praise, generic advice, style-only comments, speculative concerns, and nitpicks.
