@@ -1,4 +1,5 @@
-import { execFile } from "node:child_process";
+import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import type { Usage } from "@openai/codex-sdk";
 import {
   defaultRuntimeSettings,
@@ -15,10 +16,14 @@ import {
 import type { ReviewEngineEvent, ReviewResult, Reviewer } from "./review-engine";
 
 const MAX_TOOL_ITERATIONS = 24;
-const SHELL_TIMEOUT_MS = 30_000;
+const SHELL_TIMEOUT_MS = 60_000;
 const SHELL_MAX_BUFFER = 4 * 1024 * 1024;
 const TOOL_RESULT_MAX_CHARS = 6_000;
 const MARKDOWN_PREVIEW_CHARS = 1500;
+
+// Prefer bash so the model's bashisms ([[ ]], process substitution, brace ranges)
+// work; fall back to sh on minimal images that lack bash.
+const SHELL_PATH = existsSync("/bin/bash") ? "/bin/bash" : "/bin/sh";
 
 type ChatMessage =
   | { role: "system" | "user"; content: string }
@@ -54,13 +59,14 @@ export class OpenAICompatibleReviewEngine implements Reviewer {
       throw new Error("OpenAICompatibleReviewEngine requires the openai_compatible provider");
     }
 
+    const workspace = input.workingDirectory ?? null;
     const { system, user } = splitPrompt(buildReviewPrompt(input));
+    const systemContent = `${system}${workspaceNote(workspace)}${verificationNote(workspace)}`;
     const messages: ChatMessage[] = [
-      { role: "system", content: system },
+      { role: "system", content: systemContent },
       { role: "user", content: user }
     ];
 
-    const workspace = input.workingDirectory ?? null;
     const usage = new UsageAccumulator();
     const enableThinking = runtime.reasoningEffort !== "minimal";
 
@@ -180,7 +186,7 @@ const SHELL_TOOL = [
     function: {
       name: "run_shell",
       description:
-        "Run a shell command in the repository workspace to inspect the code (rg, git, cat, sed, ls, find, head, pipes, etc.). The workspace is a disposable checkout in an isolated container. Prefer fast read-only inspection; avoid long-running, build, or network-heavy commands.",
+        "Run a shell command to inspect the code. The command ALREADY starts in the repository root (a disposable checkout in an isolated container), so use relative paths and never cd to absolute paths like /repo. Supports rg, git, cat, sed, ls, find, head, pipes, etc. There is no stdin, so always give search tools a path (e.g. 'rg pattern .', not 'rg pattern'). Prefer fast read-only inspection; avoid long-running, build, or network-heavy commands.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -215,30 +221,31 @@ async function runShellTool(call: ToolCall, workspace: string, signal?: AbortSig
   try {
     // The workspace is a disposable checkout inside an isolated container, so the
     // command runs as-is via the shell. Containment is the container's job; here we
-    // only bound runtime and output size.
-    const { stdout, stderr } = await execFileAsync("/bin/sh", ["-c", command], {
+    // only bound runtime and output size — and close stdin so search tools (rg/grep
+    // with no path) read EOF instead of blocking on an open pipe.
+    const { stdout, stderr, code, timedOut } = await runShell(command, {
       cwd: workspace,
       timeout: SHELL_TIMEOUT_MS,
       maxBuffer: SHELL_MAX_BUFFER,
       signal
     });
     const combined = redact([stdout, stderr].filter(Boolean).join("\n").trim());
+    const ok = code === 0 && !timedOut;
+    const fallback = timedOut ? `(killed: exceeded ${SHELL_TIMEOUT_MS}ms)` : ok ? "(no output)" : `(exit ${code ?? "signal"})`;
     return {
       command,
-      status: "completed",
-      exitCode: 0,
-      resultForModel: truncate(combined || "(no output)", TOOL_RESULT_MAX_CHARS),
-      outputPreview: truncate(combined, 800)
+      status: ok ? "completed" : "failed",
+      exitCode: code,
+      resultForModel: truncate(combined || fallback, TOOL_RESULT_MAX_CHARS),
+      outputPreview: truncate(combined || fallback, 800)
     };
   } catch (error) {
-    const e = error as { code?: number | string; stdout?: string; stderr?: string; message?: string };
-    const combined = redact([e.stdout, e.stderr, e.message].filter(Boolean).join("\n").trim());
     return {
       command,
       status: "failed",
-      exitCode: typeof e.code === "number" ? e.code : null,
-      resultForModel: truncate(combined || "(command failed)", TOOL_RESULT_MAX_CHARS),
-      outputPreview: truncate(combined, 800)
+      exitCode: null,
+      resultForModel: `Error: ${error instanceof Error ? error.message : String(error)}`,
+      outputPreview: "error"
     };
   }
 }
@@ -270,6 +277,43 @@ function splitPrompt(full: string): { system: string; user: string } {
   const system = full.slice(0, sep).replace(/^\s*SYSTEM:\s*\n?/, "").trim();
   const user = full.slice(sep).replace(/^\n\s*USER:\s*\n/, "").trim();
   return { system: system || "You are a senior software engineer performing a code review.", user };
+}
+
+function workspaceNote(workspace: string | null): string {
+  if (!workspace) return "";
+  return [
+    "\n\n<workspace>",
+    `The run_shell tool already starts in the repository root: ${workspace}`,
+    'Every command runs from there. Use relative paths (e.g. "cat go.mod", "head -20 client.go"). Do NOT cd into absolute paths like /repo — they do not exist.',
+    'The tool has no stdin, so search tools must be given a path: write "rg pattern ." or "grep -rn pattern ." — never "rg pattern" with no path (it would read empty stdin and find nothing).',
+    "</workspace>"
+  ].join("\n");
+}
+
+// Guards against knowledge-cutoff false positives: a local model's training data may
+// predate the repo's toolchain, so it must verify "does not exist / won't compile"
+// claims with the actual tooling instead of asserting them from memory.
+function verificationNote(workspace: string | null): string {
+  const lines = [
+    "<verification>",
+    "Your training data may be older than the language and toolchain versions this repository uses; recent releases add new standard-library and framework APIs you may not know.",
+    "NEVER report that a symbol, function, or API 'does not exist', is 'undefined', or 'will not compile' based on memory alone."
+  ];
+  if (workspace) {
+    lines.push(
+      "Before reporting any such claim, verify it with the toolchain in this workspace — e.g. `go doc <pkg>.<Symbol>`, `go build ./...`, `go vet ./...` for Go; `npx tsc --noEmit` or the project linter for TS/JS. This overrides the 'do not run build commands' rule above, for read-only verification only (never modify files).",
+      "If a verify/build command fails only because of missing network or dependencies, say so and lower the confidence — do not treat that as proof of a bug."
+    );
+  } else {
+    lines.push(
+      "You have no workspace to verify against, so describe any uncertain API or compile concern as a low-confidence note rather than a definitive issue."
+    );
+  }
+  lines.push(
+    "If you cannot verify an existence or compile claim, put it in notes with low confidence and mark it unverified — never in criticalIssues.",
+    "</verification>"
+  );
+  return `\n\n${lines.join("\n")}`;
 }
 
 async function emitToolEvent(
@@ -307,15 +351,59 @@ function redact(value: string): string {
     .replace(/(PRIVATE-TOKEN[=:\s]+)[A-Za-z0-9._-]+/gi, "$1<redacted>");
 }
 
-function execFileAsync(
-  file: string,
-  args: string[],
+type ShellOutcome = { stdout: string; stderr: string; code: number | null; timedOut: boolean };
+
+// Runs the command via bash (or sh) with stdin closed so tools that read stdin
+// when given no path (rg, grep, cat) hit EOF instead of hanging. Bounds wall-clock
+// time and captured output size, killing the process when exceeded.
+function runShell(
+  command: string,
   options: { cwd: string; timeout: number; maxBuffer: number; signal?: AbortSignal }
-): Promise<{ stdout: string; stderr: string }> {
+): Promise<ShellOutcome> {
   return new Promise((resolve, reject) => {
-    execFile(file, args, { ...options, encoding: "utf8" }, (error, stdout, stderr) => {
-      if (error) reject(Object.assign(error, { stdout, stderr }));
-      else resolve({ stdout, stderr });
+    const child = spawn(SHELL_PATH, ["-c", command], {
+      cwd: options.cwd,
+      stdio: ["ignore", "pipe", "pipe"],
+      ...(options.signal ? { signal: options.signal } : {})
+    });
+
+    let stdout = "";
+    let stderr = "";
+    let size = 0;
+    let timedOut = false;
+    let settled = false;
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, options.timeout);
+
+    const capture = (buf: Buffer, append: (text: string) => void): void => {
+      if (size >= options.maxBuffer) return;
+      const remaining = options.maxBuffer - size;
+      if (buf.length <= remaining) {
+        append(buf.toString("utf8"));
+        size += buf.length;
+      } else {
+        append(buf.subarray(0, remaining).toString("utf8"));
+        size = options.maxBuffer;
+        child.kill("SIGKILL");
+      }
+    };
+    child.stdout.on("data", (buf: Buffer) => capture(buf, (t) => (stdout += t)));
+    child.stderr.on("data", (buf: Buffer) => capture(buf, (t) => (stderr += t)));
+
+    child.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ stdout, stderr, code, timedOut });
     });
   });
 }
