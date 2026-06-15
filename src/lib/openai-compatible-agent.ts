@@ -282,7 +282,7 @@ const FETCH_URL_TOOL_DEF = {
   function: {
     name: "fetch_url",
     description:
-      "Fetch an http(s) URL and return its text (HTML stripped). Use to read official docs, release notes, or source — e.g. https://pkg.go.dev/errors to confirm an API exists.",
+      "Fetch an http(s) URL and return its text (HTML stripped). Use to read official documentation, release notes, or source for the language/library in question to confirm an API exists or how it behaves.",
     parameters: {
       type: "object",
       additionalProperties: false,
@@ -550,7 +550,7 @@ function workspaceNote(workspace: string | null): string {
   return [
     "\n\n<workspace>",
     `The run_shell tool already starts in the repository root: ${workspace}`,
-    'Every command runs from there. Use relative paths (e.g. "cat go.mod", "head -20 client.go"). Do NOT cd into absolute paths like /repo — they do not exist.',
+    'Every command runs from there. Use relative paths (e.g. "cat README.md", "sed -n \'1,60p\' path/to/file"). Do NOT cd into absolute paths like /repo — they do not exist.',
     'The tool has no stdin, so search tools must be given a path: write "rg pattern ." or "grep -rn pattern ." — never "rg pattern" with no path (it would read empty stdin and find nothing).',
     "</workspace>"
   ].join("\n");
@@ -565,7 +565,7 @@ function webToolsNote(webTools: boolean, searchEnabled: boolean): string {
       : "You may use fetch_url(url) to read the text of a documentation or source page by its URL."
   );
   lines.push(
-    "Use this to confirm uncertain facts about recent APIs, library behavior, or versions before reporting them — e.g. fetch_url('https://pkg.go.dev/errors') to check whether a function exists.",
+    "Use this to confirm uncertain facts about recent APIs, library behavior, or versions before reporting them — e.g. open the official documentation for the language or library in question to check whether an API exists.",
     "Keep web use targeted and minimal; prefer the repository and toolchain first.",
     "</web>"
   );
@@ -584,10 +584,10 @@ function verificationNote(workspace: string | null, webTools: boolean): string {
   const verifiers: string[] = [];
   if (workspace) {
     verifiers.push(
-      "the toolchain in this workspace — e.g. `go doc <pkg>.<Symbol>`, `go build ./...`, `go vet ./...` for Go; `npx tsc --noEmit` or the project linter for TS/JS (this overrides the 'do not run build commands' rule above, for read-only verification only)"
+      "the repository's own toolchain — first detect the language(s) from the changed files and the project manifest, then run that ecosystem's compiler/type-checker/doc tool. Examples by ecosystem: Go `go build ./...` / `go vet ./...` / `go doc <sym>`; Rust `cargo check`; TypeScript/JS `npx tsc --noEmit` or the project linter; Python `python -c 'import …'` / `pyright` / `mypy`; Java/Kotlin/Gradle the build or `--dry-run`. Use whatever the repo actually uses. This overrides the 'do not run build commands' rule above, for read-only verification only"
     );
   }
-  if (webTools) verifiers.push("fetch_url (and web_search if available) against official documentation");
+  if (webTools) verifiers.push("fetch_url (and web_search if available) against the official documentation for that language or library");
   if (verifiers.length) {
     lines.push(
       `Before reporting any such claim, verify it with ${verifiers.join(", or ")}.`,
