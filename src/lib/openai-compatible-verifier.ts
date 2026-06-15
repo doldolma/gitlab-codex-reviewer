@@ -1,90 +1,86 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import type { SandboxMode, ThreadEvent } from "@openai/codex-sdk";
-import { createCodexRuntime, type CodexRuntimeBaseOptions } from "./codex-runtime";
 import type { CodexReviewModelSettings } from "./codex-review-settings";
 
-const VERIFY_TIMEOUT_MS = 180_000;
-const VERIFY_MARKER = "openai-compatible-tool-check-ok";
-const VERIFY_OUTPUT_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    marker: { type: "string" }
-  },
-  required: ["marker"]
-} as const;
+const VERIFY_TIMEOUT_MS = 20_000;
 
 export interface OpenAICompatibleVerifier {
   verify(settings: CodexReviewModelSettings): Promise<void>;
 }
 
-export class CodexOpenAICompatibleVerifier implements OpenAICompatibleVerifier {
-  constructor(
-    private readonly options: CodexRuntimeBaseOptions & { sandboxMode?: SandboxMode } = {}
-  ) {}
+/**
+ * Verifies an OpenAI-compatible endpoint directly (no codex subprocess):
+ * confirms the base URL is reachable, the configured model is served, and a
+ * minimal chat completion succeeds with the provided credentials.
+ */
+export class OpenAICompatibleConnectionVerifier implements OpenAICompatibleVerifier {
+  constructor(private readonly options: { timeoutMs?: number } = {}) {}
 
   async verify(settings: CodexReviewModelSettings): Promise<void> {
     if (settings.provider !== "openai_compatible") {
       throw new Error("OpenAI compatible settings are required");
     }
-    const workspace = await mkdtemp(join(tmpdir(), "gitlab-codex-provider-check-"));
-    const markerPath = join(workspace, "provider-check.txt");
-    await writeFile(markerPath, `${VERIFY_MARKER}\n`, "utf8");
+    const timeout = this.options.timeoutMs ?? VERIFY_TIMEOUT_MS;
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (settings.apiKey) headers.authorization = `Bearer ${settings.apiKey}`;
 
+    await this.assertModelServed(settings, headers, timeout);
+    await this.assertChatWorks(settings, headers, timeout);
+  }
+
+  private async assertModelServed(
+    settings: CodexReviewModelSettings & { provider: "openai_compatible" },
+    headers: Record<string, string>,
+    timeout: number
+  ): Promise<void> {
+    const response = await this.request(`${settings.baseUrl}/models`, { method: "GET", headers }, timeout);
+    if (!response.ok) {
+      throw new Error(`models endpoint returned ${response.status}: ${(await safeText(response)).slice(0, 300)}`);
+    }
+    const data = (await response.json()) as { data?: { id?: string }[] };
+    const ids = (data.data ?? []).map((m) => m.id).filter((id): id is string => Boolean(id));
+    if (ids.length > 0 && !ids.includes(settings.model)) {
+      throw new Error(`model "${settings.model}" is not served. Available: ${ids.slice(0, 10).join(", ")}`);
+    }
+  }
+
+  private async assertChatWorks(
+    settings: CodexReviewModelSettings & { provider: "openai_compatible" },
+    headers: Record<string, string>,
+    timeout: number
+  ): Promise<void> {
+    const response = await this.request(
+      `${settings.baseUrl}/chat/completions`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          model: settings.model,
+          messages: [{ role: "user", content: "ping" }],
+          max_tokens: 1
+        })
+      },
+      timeout
+    );
+    if (!response.ok) {
+      throw new Error(`chat/completions returned ${response.status}: ${(await safeText(response)).slice(0, 300)}`);
+    }
+  }
+
+  private async request(url: string, init: RequestInit, timeout: number): Promise<Response> {
     try {
-      const codex = createCodexRuntime(this.options, settings);
-      const thread = codex.startThread({
-        model: settings.model,
-        modelReasoningEffort: "xhigh",
-        workingDirectory: workspace,
-        skipGitRepoCheck: true,
-        sandboxMode: this.options.sandboxMode ?? "read-only",
-        approvalPolicy: "never"
-      });
-      const signal = AbortSignal.timeout(VERIFY_TIMEOUT_MS);
-      const { events } = await thread.runStreamed(
-        `Use a shell command to read provider-check.txt from the current workspace. Return JSON only with its exact content, trimmed, in the marker field.`,
-        { outputSchema: VERIFY_OUTPUT_SCHEMA, signal }
-      );
-      await verifyEvents(events);
+      return await fetch(url, { ...init, signal: AbortSignal.timeout(timeout) });
     } catch (error) {
       if (error instanceof DOMException && error.name === "TimeoutError") {
-        throw new Error("OpenAI compatible provider verification timed out after 180 seconds");
+        throw new Error(`request to ${url} timed out after ${timeout}ms`);
       }
-      throw error;
-    } finally {
-      await rm(workspace, { recursive: true, force: true });
+      throw new Error(`request to ${url} failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 }
 
-async function verifyEvents(events: AsyncGenerator<ThreadEvent>): Promise<void> {
-  let usedShell = false;
-  let finalResponse = "";
-  let failure: string | null = null;
-
-  for await (const event of events) {
-    if (event.type === "item.completed" && event.item.type === "command_execution") {
-      usedShell = true;
-    }
-    if (event.type === "item.completed" && event.item.type === "agent_message") {
-      finalResponse = event.item.text;
-    }
-    if (event.type === "turn.failed") failure = event.error.message;
-    if (event.type === "error") failure = event.message;
+async function safeText(response: Response): Promise<string> {
+  try {
+    return await response.text();
+  } catch {
+    return "";
   }
-
-  if (failure) throw new Error(failure);
-  if (!usedShell) throw new Error("OpenAI compatible model did not use the required shell tool");
-
-  const parsed = JSON.parse(stripJsonFence(finalResponse)) as { marker?: unknown };
-  if (parsed.marker !== VERIFY_MARKER) {
-    throw new Error("OpenAI compatible model returned an invalid structured verification response");
-  }
-}
-
-function stripJsonFence(raw: string): string {
-  return raw.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
 }

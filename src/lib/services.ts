@@ -13,7 +13,9 @@ import { CodexReviewSettingsService } from "./codex-review-settings";
 import { GitLabWebhookService } from "./gitlab-webhooks";
 import { CodexReviewTriageEngine } from "./review-triage";
 import { CodexReleaseNoteEngine } from "./release-note-engine";
-import { CodexOpenAICompatibleVerifier } from "./openai-compatible-verifier";
+import { OpenAICompatibleConnectionVerifier } from "./openai-compatible-verifier";
+import { OpenAICompatibleReviewEngine } from "./openai-compatible-review-engine";
+import { ProviderReviewer } from "./provider-reviewer";
 
 export const config = loadConfig();
 process.env.CODEX_HOME = config.codexHome;
@@ -26,17 +28,15 @@ export const reviewState = new ReviewStateStore(prisma);
 export const userAdmin = new UserAdminService(prisma);
 export const reviewerBot = new ReviewerBotService(prisma, config, secrets);
 export const gitlabWebhooks = new GitLabWebhookService(config, reviewState, reviewerBot, secrets);
-export const compatibleProviderVerifier = new CodexOpenAICompatibleVerifier({
-  codexBin: config.codexBin,
-  codexHome: config.codexHome,
-  sandboxMode: config.codexSandboxMode
-});
+export const compatibleProviderVerifier = new OpenAICompatibleConnectionVerifier();
 export const codexReviewSettings = new CodexReviewSettingsService(prisma, secrets, compatibleProviderVerifier);
-export const reviewEngine = new CodexReviewEngine({
+export const codexReviewEngine = new CodexReviewEngine({
   codexBin: config.codexBin,
   codexHome: config.codexHome,
   sandboxMode: config.codexSandboxMode
 });
+export const compatibleReviewEngine = new OpenAICompatibleReviewEngine();
+export const reviewEngine = new ProviderReviewer(codexReviewEngine, compatibleReviewEngine);
 export const reviewTriageEngine = new CodexReviewTriageEngine({
   codexBin: config.codexBin,
   codexHome: config.codexHome,
