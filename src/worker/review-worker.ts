@@ -18,6 +18,7 @@ import { defaultPathFilters, filterChangedFiles, matchReviewInstructions, type P
 import { parseReviewStrategy, resolveFixedReviewStrategy, type ReviewStrategy, type ReviewStrategyResolution } from "../lib/review-strategy";
 import { CodexReviewTriageEngine, type ReviewTriageRunner } from "../lib/review-triage";
 import { CodexReplier, OpenAICompatibleReplier, ProviderReplier, type Replier } from "../lib/comment-reply";
+import { APP_NAME } from "../lib/branding";
 import {
   ReviewStateStore,
   type CommitReviewRunView,
@@ -2085,7 +2086,7 @@ function formatReleaseDiff(
   }
 
   if (!diffs.length) text += "\n# No diff was returned by GitLab for this release range.\n";
-  if (truncated) text += `\n# Diff truncated by GitLab Codex Reviewer. Omitted files: ${omittedFiles}.\n`;
+  if (truncated) text += `\n# Diff truncated by ${APP_NAME}. Omitted files: ${omittedFiles}.\n`;
   return { text, truncated, omittedFiles };
 }
 

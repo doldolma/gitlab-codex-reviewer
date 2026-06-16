@@ -1,9 +1,10 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import { QueryProvider } from "../components/query-provider";
+import { APP_NAME } from "../lib/branding";
 
 export const metadata: Metadata = {
-  title: "GitLab Codex Reviewer",
+  title: APP_NAME,
   description: "GitLab merge request와 commit review를 관리하는 개인 리뷰 콘솔"
 };
 

@@ -136,7 +136,7 @@ describe("GitLabClient discovery helpers", () => {
         tag_push_events: true,
         merge_requests_events: true,
         enable_ssl_verification: true,
-        name: "GitLab Codex Reviewer"
+        name: "GitLab AI Reviewer"
       });
       return new Response(JSON.stringify({ id: 99, url: body.url }), { status: 200 });
     });
@@ -145,7 +145,7 @@ describe("GitLabClient discovery helpers", () => {
     const hook = await new GitLabClient(connection).createProjectHook("123", {
       url: "https://reviewer.example.com/api/gitlab/webhook",
       token: "hook-secret",
-      name: "GitLab Codex Reviewer"
+      name: "GitLab AI Reviewer"
     });
 
     expect(hook.id).toBe(99);

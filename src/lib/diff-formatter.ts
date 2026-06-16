@@ -1,3 +1,4 @@
+import { APP_NAME } from "./branding";
 import type { GitLabCommit, GitLabDiff, GitLabMergeRequest } from "./gitlab-client";
 
 export type FormattedDiff = {
@@ -82,7 +83,7 @@ function formatDiffBody(header: string, diffs: GitLabDiff[], maxBytes: number): 
   }
 
   if (truncated) {
-    text += `\n# Diff truncated by GitLab Codex Reviewer. Omitted files: ${omittedFiles}.\n`;
+    text += `\n# Diff truncated by ${APP_NAME}. Omitted files: ${omittedFiles}.\n`;
   }
 
   return { text, truncated, omittedFiles };

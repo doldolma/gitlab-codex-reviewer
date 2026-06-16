@@ -1,6 +1,6 @@
 # 서버 설정
 
-이 문서는 GitLab Codex Reviewer를 로컬이나 서버에서 실행할 때 필요한 설정을 정리합니다. 운영 배포는 Docker Compose를 우선 권장합니다.
+이 문서는 GitLab AI Reviewer를 로컬이나 서버에서 실행할 때 필요한 설정을 정리합니다. 운영 배포는 Docker Compose를 우선 권장합니다.
 
 ## 요구사항
 

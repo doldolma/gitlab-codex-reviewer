@@ -1,6 +1,6 @@
-# GitLab Codex Reviewer
+# GitLab AI Reviewer
 
-GitLab Codex Reviewer는 소규모 팀이 GitLab Merge Request와 branch commit의 1차 코드 리뷰를 AI에 맡길 수 있도록 만든 self-hosted 웹 앱입니다.
+GitLab AI Reviewer는 소규모 팀이 GitLab Merge Request와 branch commit의 1차 코드 리뷰를 AI에 맡길 수 있도록 만든 self-hosted 웹 앱입니다.
 
 GitLab webhook으로 변경을 감지하고, Reviewer Bot 계정으로 diff와 repository context를 읽은 뒤, AI 리뷰 결과를 GitLab 댓글로 남깁니다. Codex 계정 또는 OpenAI Responses API 호환 서버를 인스턴스 공용 provider로 선택할 수 있습니다.
 

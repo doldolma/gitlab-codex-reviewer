@@ -1,4 +1,5 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
+import { APP_NAME } from "./branding";
 import type { AppConfig } from "./config";
 import { GitLabClient, type GitLabCommit, type GitLabMergeRequest } from "./gitlab-client";
 import { nowIso } from "./prisma";
@@ -81,8 +82,8 @@ export class GitLabWebhookService {
       const hooks = await client.listProjectHooks(project.gitlabProjectId);
       const existing = hooks.find((hook) => hook.id === project.webhookHookId) ?? hooks.find((hook) => hook.url === url);
       const hook = existing
-        ? await client.updateProjectHook(project.gitlabProjectId, existing.id, { url, token: secret, name: "GitLab Codex Reviewer" })
-        : await client.createProjectHook(project.gitlabProjectId, { url, token: secret, name: "GitLab Codex Reviewer" });
+        ? await client.updateProjectHook(project.gitlabProjectId, existing.id, { url, token: secret, name: APP_NAME })
+        : await client.createProjectHook(project.gitlabProjectId, { url, token: secret, name: APP_NAME });
 
       return this.state.updateGitlabProjectWebhook(project.id, {
         webhookHookId: hook.id,

@@ -5,6 +5,7 @@ import { GitBranch, ShieldCheck } from "lucide-react";
 import { useSearchParams } from "next/navigation";
 import { Suspense, useEffect } from "react";
 import { apiGet, type AuthStatus } from "../../lib/api-client";
+import { APP_NAME } from "../../lib/branding";
 
 export default function LoginPage() {
   return (
@@ -34,7 +35,7 @@ function LoginContent() {
         <div className="login-mark">
           <ShieldCheck size={30} />
         </div>
-        <h1>GitLab Codex Reviewer</h1>
+        <h1>{APP_NAME}</h1>
         <p>GitLab MR과 커밋 리뷰를 관리하는 개인 리뷰 콘솔입니다.</p>
         {error && <div className="alert bad">{error}</div>}
         {auth.data?.oauthConfigured === false && (

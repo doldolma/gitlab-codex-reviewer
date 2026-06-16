@@ -7,6 +7,7 @@ import { useEffect } from "react";
 import { GitCommit, GitMerge, LayoutDashboard, LogOut, Newspaper, Settings, ShieldCheck } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiGet, apiSend, type AuthStatus } from "../lib/api-client";
+import { APP_NAME } from "../lib/branding";
 
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
@@ -39,7 +40,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         <div className="brand">
           <ShieldCheck size={22} />
           <div>
-            <strong>Codex Reviewer</strong>
+            <strong>{APP_NAME}</strong>
             <span>
               {auth.data.currentUser?.username} · {auth.data.currentUser?.role === "admin" ? "관리자" : "사용자"}
             </span>
